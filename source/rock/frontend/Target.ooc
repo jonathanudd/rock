@@ -81,6 +81,7 @@ Target: class {
             case This OPENBSD   => "openbsd" + arch
             case This NETBSD    => "netbsd" + arch
             case This DRAGONFLY => "dragonfly" + arch
+            case This ANDROID   => "android" + arch
             case                => Exception new("Invalid arch: " + target toString()) throw(); ""
         }
 
