@@ -45,6 +45,10 @@ AndroidDriver: class extends Driver {
             generateSources(sourceFolder)
         }
 
+        /* This is a hack by Emil to generate one single Android.mk file containing sources for every module */
+        generateSingleMakefile(sourceFolders)
+        return 0
+
         // step 3: generate Android.mk files
         for (sourceFolder in sourceFolders) {
             generateMakefile(sourceFolder)
@@ -71,6 +75,66 @@ AndroidDriver: class extends Driver {
 
     }
 
+    generateSingleMakefile: func (sourceFolders: HashMap<String, SourceFolder>) {
+        dest := File new(File new(params outPath, "/"), "Android.mk")
+        fw := FileWriter new(dest)
+        fw write("LOCAL_PATH := $(call my-dir)\n")
+        fw write("\n")
+        fw write("include $(CLEAR_VARS)\n")
+        fw write("\n")
+        fw write("LOCAL_MODULE := "). write("ooc"). write("\n")
+        fw write("LOCAL_C_INCLUDES := ")
+        for(sourceFolder in sourceFolders) {
+          deps := collectSourceFolders(sourceFolder)
+          for (dep in deps) {
+              //fw write("$(LOCAL_PATH)/"). write(dep identifier). write(" ")
+          }
+          fw write("$(LOCAL_PATH)/"). write(sourceFolder identifier). write(" ")
+        }
+
+        for(sourceFolder in sourceFolders) {
+          uses := collectUses(sourceFolder)
+          for (useDef in uses) {
+              for (path in useDef androidIncludePaths) {
+                if(path != "../gc/include")
+                  fw write("$(LOCAL_PATH)/"). write(path). write(" ")
+              }
+          }
+        }
+        fw write("\n")
+        fw write("\n")
+        fw write("LOCAL_SRC_FILES := ")
+        for(sourceFolder in sourceFolders) {
+          for (module in sourceFolder modules) {
+              path := module getPath(".c")
+              fw write(sourceFolder identifier). write("/"). write(path). write(" ")
+          }
+        }
+
+        localLdLibs := ArrayList<String> new()
+        for(sourceFolder in sourceFolders) {
+          uses := collectUses(sourceFolder)
+          for (useDef in uses) {
+              props := useDef getRelevantProperties(params)
+              for (lib in props libs) {
+                if (!localLdLibs contains?(lib))
+                  localLdLibs add(lib)
+              }
+          }
+        }
+        fw write("\n")
+        if (!localLdLibs empty?()) {
+            fw write("LOCAL_LDLIBS := ")
+            for (lib in localLdLibs) {
+                fw write(lib). write(" ")
+            }
+            fw write("\n\n")
+        }
+
+        fw write("include $(BUILD_SHARED_LIBRARY)")
+
+        fw close()
+    }
     generateMakefile: func (sourceFolder: SourceFolder) {
         deps := collectSourceFolders(sourceFolder)
         uses := collectUses(sourceFolder)
@@ -84,7 +148,6 @@ AndroidDriver: class extends Driver {
         fw write("\n")
         fw write("LOCAL_MODULE := "). write(sourceFolder identifier). write("\n")
         fw write("LOCAL_C_INCLUDES := ")
-
         for (dep in deps) {
             fw write("$(LOCAL_PATH)/../"). write(dep identifier). write(" ")
         }
@@ -92,6 +155,7 @@ AndroidDriver: class extends Driver {
 
         for (useDef in uses) {
             for (path in useDef androidIncludePaths) {
+              if(path != "../gc/include")
                 fw write("$(LOCAL_PATH)/"). write(path). write(" ")
             }
         }
@@ -133,6 +197,7 @@ AndroidDriver: class extends Driver {
         if (!localSharedLibraries empty?()) {
             fw write("LOCAL_SHARED_LIBRARIES := ")
             for (lib in localSharedLibraries) {
+              if(lib != "gc")
                 fw write(lib). write(" ")
             }
             fw write("\n\n")
