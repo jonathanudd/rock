@@ -82,6 +82,9 @@ AndroidDriver: class extends Driver {
         fw write("\n")
         fw write("include $(CLEAR_VARS)\n")
         fw write("\n")
+
+        fw write("LOCAL_ALLOW_UNDEFINED_SYMBOLS := true\n")
+        fw write("\n")
         fw write("LOCAL_MODULE := "). write("ooc"). write("\n")
         fw write("LOCAL_C_INCLUDES := ")
         for(sourceFolder in sourceFolders) {
@@ -110,7 +113,40 @@ AndroidDriver: class extends Driver {
               fw write(sourceFolder identifier). write("/"). write(path). write(" ")
           }
         }
+        for(sourceFolder in sourceFolders) {
+          useDef := UseDef parse(sourceFolder identifier, params)
+          if (useDef) {
+              props := useDef getRelevantProperties(params)
 
+              for (additional in props additionals) {
+                  cPath := File new(useDef identifier, additional relative path) path
+
+                  if (params verbose) {
+                      "cPath for additional: %s" printfln(cPath)
+                  }
+
+                  fw write(sourceFolder identifier). write("/"). write(cPath). write(" ")
+              }
+          }
+        }
+        fw write("\n")
+
+        localSharedLibraries := ArrayList<String> new()
+        for(sourceFolder in sourceFolders) {
+          uses := collectUses(sourceFolder)
+          for (useDef in uses) {
+              localSharedLibraries addAll(useDef androidLibs)
+          }
+
+        }
+        if (!localSharedLibraries empty?()) {
+            fw write("LOCAL_SHARED_LIBRARIES := ")
+            for (lib in localSharedLibraries) {
+              if(lib != "gc")
+                fw write(lib). write(" ")
+            }
+            fw write("\n\n")
+        }
         localLdLibs := ArrayList<String> new()
         for(sourceFolder in sourceFolders) {
           uses := collectUses(sourceFolder)
@@ -126,7 +162,8 @@ AndroidDriver: class extends Driver {
         if (!localLdLibs empty?()) {
             fw write("LOCAL_LDLIBS := ")
             for (lib in localLdLibs) {
-                fw write(lib). write(" ")
+                if(lib != "-lX11")
+                  fw write(lib). write(" ")
             }
             fw write("\n\n")
         }
