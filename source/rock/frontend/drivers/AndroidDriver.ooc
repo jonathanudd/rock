@@ -80,10 +80,31 @@ AndroidDriver: class extends Driver {
         fw := FileWriter new(dest)
         fw write("LOCAL_PATH := $(call my-dir)\n")
         fw write("\n")
-        fw write("include $(CLEAR_VARS)\n")
-        fw write("\n")
 
-        fw write("LOCAL_ALLOW_UNDEFINED_SYMBOLS := true\n")
+        localSharedLibraries := ArrayList<String> new()
+        for(sourceFolder in sourceFolders) {
+          uses := collectUses(sourceFolder)
+          for (useDef in uses) {
+              localSharedLibraries addAll(useDef androidLibs)
+          }
+        }
+
+        if (!localSharedLibraries empty?()) {
+
+            for (lib in localSharedLibraries) {
+              if(lib == "gc")
+                continue
+              fw write("include $(CLEAR_VARS)\n")
+              fw write("LOCAL_MODULE := ")
+              fw write(lib). write("\n")
+              fw write("LOCAL_SRC_FILES := ")
+              fw write(lib). write(".so\n")
+              fw write("include $(PREBUILT_SHARED_LIBRARY)\n")
+            }
+            fw write("\n\n")
+        }
+
+        fw write("include $(CLEAR_VARS)\n")
         fw write("\n")
         fw write("LOCAL_MODULE := "). write("ooc"). write("\n")
         fw write("LOCAL_C_INCLUDES := ")
@@ -131,14 +152,7 @@ AndroidDriver: class extends Driver {
         }
         fw write("\n")
 
-        localSharedLibraries := ArrayList<String> new()
-        for(sourceFolder in sourceFolders) {
-          uses := collectUses(sourceFolder)
-          for (useDef in uses) {
-              localSharedLibraries addAll(useDef androidLibs)
-          }
 
-        }
         if (!localSharedLibraries empty?()) {
             fw write("LOCAL_SHARED_LIBRARIES := ")
             for (lib in localSharedLibraries) {
