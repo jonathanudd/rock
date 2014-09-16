@@ -85,7 +85,10 @@ AndroidDriver: class extends Driver {
         for(sourceFolder in sourceFolders) {
           uses := collectUses(sourceFolder)
           for (useDef in uses) {
-              localSharedLibraries addAll(useDef androidLibs)
+            for(lib in useDef androidLibs) {
+              if(!localSharedLibraries contains?(lib))
+              localSharedLibraries add(lib)
+            }
           }
         }
 
