@@ -82,12 +82,19 @@ AndroidDriver: class extends Driver {
         fw write("\n")
 
         localSharedLibraries := ArrayList<String> new()
+        localStaticLibraries := ArrayList<String> new()
         for(sourceFolder in sourceFolders) {
           uses := collectUses(sourceFolder)
           for (useDef in uses) {
             for(lib in useDef androidLibs) {
-              if(!localSharedLibraries contains?(lib))
-              localSharedLibraries add(lib)
+              if(lib[0] == 'S') {
+                if(!localStaticLibraries contains?(lib substring(1)))
+                  localStaticLibraries add(lib substring(1))
+              }
+              else {
+                if(!localSharedLibraries contains?(lib))
+                  localSharedLibraries add(lib)
+              }
             }
           }
         }
@@ -103,6 +110,19 @@ AndroidDriver: class extends Driver {
               fw write("LOCAL_SRC_FILES := ")
               fw write(lib). write(".so\n")
               fw write("include $(PREBUILT_SHARED_LIBRARY)\n")
+            }
+            fw write("\n\n")
+        }
+
+        if (!localStaticLibraries empty?()) {
+
+            for (lib in localStaticLibraries) {
+              fw write("include $(CLEAR_VARS)\n")
+              fw write("LOCAL_MODULE := ")
+              fw write(lib). write("\n")
+              fw write("LOCAL_SRC_FILES := ")
+              fw write(lib). write(".a\n")
+              fw write("include $(PREBUILT_STATIC_LIBRARY)\n")
             }
             fw write("\n\n")
         }
@@ -160,6 +180,13 @@ AndroidDriver: class extends Driver {
             fw write("LOCAL_SHARED_LIBRARIES := ")
             for (lib in localSharedLibraries) {
               if(lib != "gc")
+                fw write(lib). write(" ")
+            }
+            fw write("\n\n")
+        }
+        if (!localStaticLibraries empty?()) {
+            fw write("LOCAL_STATIC_LIBRARIES := ")
+            for (lib in localStaticLibraries) {
                 fw write(lib). write(" ")
             }
             fw write("\n\n")
