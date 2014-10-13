@@ -102,8 +102,8 @@ AndroidDriver: class extends Driver {
         if (!localSharedLibraries empty?()) {
 
             for (lib in localSharedLibraries) {
-              if(lib == "gc")
-                continue
+              //if(lib == "gc")
+              //  continue
               fw write("include $(CLEAR_VARS)\n")
               fw write("LOCAL_MODULE := ")
               fw write(lib). write("\n")
@@ -139,12 +139,15 @@ AndroidDriver: class extends Driver {
           fw write("$(LOCAL_PATH)/"). write(sourceFolder identifier). write(" ")
         }
 
+        fw write("\n"). write("LOCAL_CFLAGS += -DNDEBUG"). write("\n")
+        fw write("\n"). write("LOCAL_CFLAGS += -O2"). write("\n")
+
         for(sourceFolder in sourceFolders) {
           uses := collectUses(sourceFolder)
           for (useDef in uses) {
               for (path in useDef androidIncludePaths) {
-                if(path != "../gc/include")
-                  fw write("$(LOCAL_PATH)/"). write(path). write(" ")
+                //if(path != "../gc/include")
+                  //fw write("$(LOCAL_PATH)/"). write(path). write(" ")
               }
           }
         }
@@ -179,7 +182,7 @@ AndroidDriver: class extends Driver {
         if (!localSharedLibraries empty?()) {
             fw write("LOCAL_SHARED_LIBRARIES := ")
             for (lib in localSharedLibraries) {
-              if(lib != "gc")
+              //if(lib != "gc")
                 fw write(lib). write(" ")
             }
             fw write("\n\n")
@@ -206,8 +209,7 @@ AndroidDriver: class extends Driver {
         if (!localLdLibs empty?()) {
             fw write("LOCAL_LDLIBS := ")
             for (lib in localLdLibs) {
-                if(lib != "-lX11")
-                  fw write(lib). write(" ")
+              fw write(lib). write(" ")
             }
             fw write("\n\n")
         }
