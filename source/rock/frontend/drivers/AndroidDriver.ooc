@@ -22,177 +22,321 @@ import rock/backend/cnaughty/CGenerator
 
 AndroidDriver: class extends Driver {
 
-    sourceFolders := HashMap<String, SourceFolder> new()
+	sourceFolders := HashMap<String, SourceFolder> new()
 
-    init: func (.params) {
-        super(params)
-    }
+	init: func (.params) {
+			super(params)
+	}
 
-    compile: func (module: Module) -> Int {
-        "Android driver here, should compile module %s" printfln(module fullName)
+	compile: func (module: Module) -> Int {
+			"Android driver here, should compile module %s" printfln(module fullName)
 
-        sourceFolders = collectDeps(module, HashMap<String, SourceFolder> new(), ArrayList<Module> new())
+			sourceFolders = collectDeps(module, HashMap<String, SourceFolder> new(), ArrayList<Module> new())
 
-        // step 1: copy local headers
-        params libcachePath = params outPath path
-        copyLocals(module, params)
+			// step 1: copy local headers
+			params libcachePath = params outPath path
+			copyLocals(module, params)
 
-        // from then on, we handle the show - adjusting outPath as we go
-        params libcache = false
+			// from then on, we handle the show - adjusting outPath as we go
+			params libcache = false
 
-        // step 2: generate C sources
-        for (sourceFolder in sourceFolders) {
-            generateSources(sourceFolder)
-        }
+			// step 2: generate C sources
+			for (sourceFolder in sourceFolders) {
+					generateSources(sourceFolder)
+			}
 
-        // step 3: generate Android.mk files
-        for (sourceFolder in sourceFolders) {
-            generateMakefile(sourceFolder)
-        }
+			/* This is a hack by Emil to generate one single Android.mk file containing sources for every module */
+			generateSingleMakefile(sourceFolders)
+			return 0
 
-        0
-    }
+			// step 3: generate Android.mk files
+			for (sourceFolder in sourceFolders) {
+					generateMakefile(sourceFolder)
+			}
 
-    /**
-     * Build a source folder into object files or a static library
-     */
-    generateSources: func (sourceFolder: SourceFolder) {
+			0
+	}
 
-        originalOutPath := params outPath
-        params outPath = File new(originalOutPath, sourceFolder identifier)
+	/**
+	 * Build a source folder into object files or a static library
+	 */
+	generateSources: func (sourceFolder: SourceFolder) {
 
-        "Generating sources in %s" printfln(params outPath path)
+			originalOutPath := params outPath
+			params outPath = File new(originalOutPath, sourceFolder identifier)
 
-        for(module in sourceFolder modules) {
-            CGenerator new(params, module) write()
-        }
+			"Generating sources in %s" printfln(params outPath path)
 
-        params outPath = originalOutPath
+			for(module in sourceFolder modules) {
+					CGenerator new(params, module) write()
+			}
 
-    }
+			params outPath = originalOutPath
 
-    generateMakefile: func (sourceFolder: SourceFolder) {
-        deps := collectSourceFolders(sourceFolder)
-        uses := collectUses(sourceFolder)
+	}
 
-        dest := File new(File new(params outPath, sourceFolder identifier), "Android.mk")
-        fw := FileWriter new(dest)
+	generateSingleMakefile: func (sourceFolders: HashMap<String, SourceFolder>) {
+			dest := File new(File new(params outPath, "/"), "Android.mk")
+			fw := FileWriter new(dest)
+			fw write("LOCAL_PATH := $(call my-dir)\n")
+			fw write("\n")
 
-        fw write("LOCAL_PATH := $(call my-dir)\n")
-        fw write("\n")
-        fw write("include $(CLEAR_VARS)\n")
-        fw write("\n")
-        fw write("LOCAL_MODULE := "). write(sourceFolder identifier). write("\n")
-        fw write("LOCAL_C_INCLUDES := ")
+			localSharedLibraries := ArrayList<String> new()
+			localStaticLibraries := ArrayList<String> new()
+			for(sourceFolder in sourceFolders) {
+				uses := collectUses(sourceFolder)
+				for (useDef in uses) {
+					for(lib in useDef androidLibs) {
+						if(lib[0] == 'S') {
+							if(!localStaticLibraries contains?(lib substring(1)))
+								localStaticLibraries add(lib substring(1))
+						}
+						else {
+							if(!localSharedLibraries contains?(lib))
+								localSharedLibraries add(lib)
+						}
+					}
+				}
+			}
 
-        for (dep in deps) {
-            fw write("$(LOCAL_PATH)/../"). write(dep identifier). write(" ")
-        }
-        fw write("$(LOCAL_PATH)/../"). write(sourceFolder identifier). write(" ")
+			if (!localSharedLibraries empty?()) {
 
-        for (useDef in uses) {
-            for (path in useDef androidIncludePaths) {
-                fw write("$(LOCAL_PATH)/"). write(path). write(" ")
-            }
-        }
+					for (lib in localSharedLibraries) {
+						//if(lib == "gc")
+						//  continue
+						fw write("include $(CLEAR_VARS)\n")
+						fw write("LOCAL_MODULE := ")
+						fw write(lib). write("\n")
+						fw write("LOCAL_SRC_FILES := ")
+						fw write(lib). write(".so\n")
+						fw write("include $(PREBUILT_SHARED_LIBRARY)\n")
+					}
+					fw write("\n\n")
+			}
 
-        fw write("\n")
-        fw write("\n")
+			if (!localStaticLibraries empty?()) {
 
-        fw write("LOCAL_SRC_FILES := ")
-        for (module in sourceFolder modules) {
-            path := module getPath(".c")
-            fw write(path). write(" ")
-        }
+					for (lib in localStaticLibraries) {
+						fw write("include $(CLEAR_VARS)\n")
+						fw write("LOCAL_MODULE := ")
+						fw write(lib). write("\n")
+						fw write("LOCAL_SRC_FILES := ")
+						fw write(lib). write(".a\n")
+						fw write("include $(PREBUILT_STATIC_LIBRARY)\n")
+					}
+					fw write("\n\n")
+			}
 
-        useDef := UseDef parse(sourceFolder identifier, params)
-        if (useDef) {
-            props := useDef getRelevantProperties(params)
+			fw write("include $(CLEAR_VARS)\n")
+			fw write("\n")
+			fw write("LOCAL_MODULE := "). write("ooc"). write("\n")
+			fw write("LOCAL_C_INCLUDES := ")
+			for(sourceFolder in sourceFolders) {
+				deps := collectSourceFolders(sourceFolder)
+				for (dep in deps) {
+				}
+				fw write("$(LOCAL_PATH)/"). write(sourceFolder identifier). write(" ")
+			}
 
-            for (additional in props additionals) {
-                cPath := File new(useDef identifier, additional relative path) path
+			fw write("\n"). write("LOCAL_CFLAGS += -DNDEBUG"). write("\n")
+			fw write("\n"). write("LOCAL_CFLAGS += -O2"). write("\n")
 
-                if (params verbose) {
-                    "cPath for additional: %s" printfln(cPath)
-                }
+			for(sourceFolder in sourceFolders) {
+				uses := collectUses(sourceFolder)
+				for (useDef in uses) {
+						for (path in useDef androidIncludePaths) {
+						}
+				}
+			}
+			fw write("\n")
+			fw write("\n")
+			fw write("LOCAL_SRC_FILES := ")
+			for(sourceFolder in sourceFolders) {
+				for (module in sourceFolder modules) {
+						path := module getPath(".c")
+						fw write(sourceFolder identifier). write("/"). write(path). write(" ")
+				}
+			}
+			for(sourceFolder in sourceFolders) {
+				useDef := UseDef parse(sourceFolder identifier, params)
+				if (useDef) {
+						props := useDef getRelevantProperties(params)
 
-                fw write(cPath). write(" ")
-            }
-        }
-        fw write("\n")
+						for (additional in props additionals) {
+								cPath := File new(useDef identifier, additional relative path) path
 
-        localSharedLibraries := ArrayList<String> new()
-        for (useDef in uses) {
-            localSharedLibraries addAll(useDef androidLibs)
-        }
+								if (params verbose) {
+										"cPath for additional: %s" printfln(cPath)
+								}
 
-        for (dep in deps) {
-            localSharedLibraries add(dep identifier)
-        }
+								fw write(sourceFolder identifier). write("/"). write(cPath). write(" ")
+						}
+				}
+			}
+			fw write("\n")
 
-        if (!localSharedLibraries empty?()) {
-            fw write("LOCAL_SHARED_LIBRARIES := ")
-            for (lib in localSharedLibraries) {
-                fw write(lib). write(" ")
-            }
-            fw write("\n\n")
-        }
 
-        localLdLibs := ArrayList<String> new()
-        for (useDef in uses) {
-            props := useDef getRelevantProperties(params)
-            localLdLibs addAll(props libs)
-        }
+			if (!localSharedLibraries empty?()) {
+					fw write("LOCAL_SHARED_LIBRARIES := ")
+					for (lib in localSharedLibraries) {
+						fw write(lib). write(" ")
+					}
+					fw write("\n\n")
+			}
+			if (!localStaticLibraries empty?()) {
+					fw write("LOCAL_STATIC_LIBRARIES := ")
+					for (lib in localStaticLibraries) {
+							fw write(lib). write(" ")
+					}
+					fw write("\n\n")
+			}
+			localLdLibs := ArrayList<String> new()
+			for(sourceFolder in sourceFolders) {
+				uses := collectUses(sourceFolder)
+				for (useDef in uses) {
+						props := useDef getRelevantProperties(params)
+						for (lib in props libs) {
+							if (!localLdLibs contains?(lib))
+								localLdLibs add(lib)
+						}
+				}
+			}
+			fw write("\n")
+			if (!localLdLibs empty?()) {
+					fw write("LOCAL_LDLIBS := ")
+					for (lib in localLdLibs) {
+						fw write(lib). write(" ")
+					}
+					fw write("\n\n")
+			}
 
-        if (!localLdLibs empty?()) {
-            fw write("LOCAL_LDLIBS := ")
-            for (lib in localLdLibs) {
-                fw write(lib). write(" ")
-            }
-            fw write("\n\n")
-        }
+			fw write("include $(BUILD_SHARED_LIBRARY)")
 
-        fw write("include $(BUILD_SHARED_LIBRARY)")
+			fw close()
+	}
+	generateMakefile: func (sourceFolder: SourceFolder) {
+			deps := collectSourceFolders(sourceFolder)
+			uses := collectUses(sourceFolder)
 
-        fw close()
-    }
+			dest := File new(File new(params outPath, sourceFolder identifier), "Android.mk")
+			fw := FileWriter new(dest)
 
-    /** TODO: This is redundant with collectDeps, merge those */
-    collectSourceFolders: func ~sourceFolders (sourceFolder: SourceFolder, \
-            modulesDone := ArrayList<Module> new(), sourceFoldersDone := ArrayList<SourceFolder> new()) -> List<SourceFolder> {
+			fw write("LOCAL_PATH := $(call my-dir)\n")
+			fw write("\n")
+			fw write("include $(CLEAR_VARS)\n")
+			fw write("\n")
+			fw write("LOCAL_MODULE := "). write(sourceFolder identifier). write("\n")
+			fw write("LOCAL_C_INCLUDES := ")
+			for (dep in deps) {
+					fw write("$(LOCAL_PATH)/../"). write(dep identifier). write(" ")
+			}
+			fw write("$(LOCAL_PATH)/../"). write(sourceFolder identifier). write(" ")
 
-        for (module in sourceFolder modules) {
-            collectSourceFolders(module, modulesDone, sourceFoldersDone)
-        }
+			for (useDef in uses) {
+					for (path in useDef androidIncludePaths) {
+						if(path != "../gc/include")
+							fw write("$(LOCAL_PATH)/"). write(path). write(" ")
+					}
+			}
 
-        sourceFoldersDone filter(|sf| sf != sourceFolder)
-    }
+			fw write("\n")
+			fw write("\n")
 
-    collectSourceFolders: func ~modules (module: Module, \
-            modulesDone := ArrayList<Module> new(), sourceFoldersDone := ArrayList<SourceFolder> new()) -> List<SourceFolder> {
+			fw write("LOCAL_SRC_FILES := ")
+			for (module in sourceFolder modules) {
+					path := module getPath(".c")
+					fw write(path). write(" ")
+			}
 
-        if (modulesDone contains?(module)) {
-            return sourceFoldersDone
-        }
-        modulesDone add(module)
+			useDef := UseDef parse(sourceFolder identifier, params)
+			if (useDef) {
+					props := useDef getRelevantProperties(params)
 
-        for (uze in module getUses()) {
-            useDef := uze useDef
-            dep := sourceFolders get(useDef identifier)
-            if (dep && !sourceFoldersDone contains?(dep)) {
-                sourceFoldersDone add(dep)
-            }
-        }
+					for (additional in props additionals) {
+							cPath := File new(useDef identifier, additional relative path) path
 
-        for (imp in module getAllImports()) {
-            collectSourceFolders(imp getModule(), modulesDone, sourceFoldersDone)
-        }
+							if (params verbose) {
+									"cPath for additional: %s" printfln(cPath)
+							}
 
-        sourceFoldersDone
-    }
+							fw write(cPath). write(" ")
+					}
+			}
+			fw write("\n")
 
-    doublePrefix: func -> Bool {
-        true
-    }
+			localSharedLibraries := ArrayList<String> new()
+			for (useDef in uses) {
+					localSharedLibraries addAll(useDef androidLibs)
+			}
+
+			for (dep in deps) {
+					localSharedLibraries add(dep identifier)
+			}
+
+			if (!localSharedLibraries empty?()) {
+					fw write("LOCAL_SHARED_LIBRARIES := ")
+					for (lib in localSharedLibraries) {
+						if(lib != "gc")
+							fw write(lib). write(" ")
+					}
+					fw write("\n\n")
+			}
+
+			localLdLibs := ArrayList<String> new()
+			for (useDef in uses) {
+					props := useDef getRelevantProperties(params)
+					localLdLibs addAll(props libs)
+			}
+
+			if (!localLdLibs empty?()) {
+					fw write("LOCAL_LDLIBS := ")
+					for (lib in localLdLibs) {
+							fw write(lib). write(" ")
+					}
+					fw write("\n\n")
+			}
+
+			fw write("include $(BUILD_SHARED_LIBRARY)")
+
+			fw close()
+	}
+
+	/** TODO: This is redundant with collectDeps, merge those */
+	collectSourceFolders: func ~sourceFolders (sourceFolder: SourceFolder, \
+					modulesDone := ArrayList<Module> new(), sourceFoldersDone := ArrayList<SourceFolder> new()) -> List<SourceFolder> {
+
+			for (module in sourceFolder modules) {
+					collectSourceFolders(module, modulesDone, sourceFoldersDone)
+			}
+
+			sourceFoldersDone filter(|sf| sf != sourceFolder)
+	}
+
+	collectSourceFolders: func ~modules (module: Module, \
+					modulesDone := ArrayList<Module> new(), sourceFoldersDone := ArrayList<SourceFolder> new()) -> List<SourceFolder> {
+
+			if (modulesDone contains?(module)) {
+					return sourceFoldersDone
+			}
+			modulesDone add(module)
+
+			for (uze in module getUses()) {
+					useDef := uze useDef
+					dep := sourceFolders get(useDef identifier)
+					if (dep && !sourceFoldersDone contains?(dep)) {
+							sourceFoldersDone add(dep)
+					}
+			}
+
+			for (imp in module getAllImports()) {
+					collectSourceFolders(imp getModule(), modulesDone, sourceFoldersDone)
+			}
+
+			sourceFoldersDone
+	}
+
+	doublePrefix: func -> Bool {
+			true
+	}
 
 }
