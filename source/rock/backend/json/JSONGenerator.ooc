@@ -16,6 +16,8 @@ import ../../middle/[Module, FunctionDecl, FunctionCall, Expression, Type,
 
 JSONGenerator: class extends Visitor {
 
+    VERSION := static "2.0.0"
+
     params: BuildParams
     outFile: File
     module: Module
@@ -29,6 +31,8 @@ JSONGenerator: class extends Visitor {
         objects = MultiMap<String, HashBag> new()
 
         /* build the structure! */
+        root put("version", VERSION)
+
         root put("path", module path)
 
         globalImports := Bag new()
@@ -67,13 +71,15 @@ JSONGenerator: class extends Visitor {
         obj put("token", bag)
     }
 
-    resolveType: func (type: Type) -> String {
+    resolveType: func (type: Type, full := false) -> String {
         if(type instanceOf?(FuncType)) {
-            return generateFuncTag(type as FuncType)
+            return generateFuncTag(type as FuncType, full)
+        } else if(type instanceOf?(ArrayType)) {
+            return "array(%s)" format(resolveType(type as ArrayType inner, full))
         } else if(type instanceOf?(PointerType)) {
-            return "pointer(%s)" format(resolveType(type as PointerType inner))
+            return "pointer(%s)" format(resolveType(type as PointerType inner, full))
         } else if(type instanceOf?(ReferenceType)) {
-            return "reference(%s)" format(resolveType(type as ReferenceType inner))
+            return "reference(%s)" format(resolveType(type as ReferenceType inner, full))
         } else if(type instanceOf?(TypeList)) {
             buffer := Buffer new()
             buffer append("multi(")
@@ -81,13 +87,25 @@ JSONGenerator: class extends Visitor {
             for(subtype in type as TypeList types) {
                 if(isFirst) isFirst = false
                 else        buffer append(",")
-                buffer append(resolveType(subtype))
+                buffer append(resolveType(subtype, full))
             }
             buffer append(')')
             return buffer toString()
-        } else {
+        } else if(type instanceOf?(BaseType)) {
             /* base type */
-            return type as BaseType name /* TODO? */
+            if (full) {
+                ref := type getRef()
+                match ref {
+                    case td: TypeDecl =>
+                        td getFullName()
+                    case =>
+                        "any"
+                }
+            } else {
+                return type as BaseType name /* TODO? */
+            }
+        } else {
+            "any"
         }
     }
 
@@ -165,16 +183,18 @@ JSONGenerator: class extends Visitor {
         obj put("abstract", node isAbstract)
         /* `final` */
         obj put("final", node isFinal)
-         /* `fullName` */
-        obj put("fullName", node underName())
+         /* `nameFqn` */
+        obj put("nameFqn", node underName())
         /* `tag` */
         obj put("tag", node name as String)
         /* `doc` */
         obj put("doc", node doc)
         /* `extends` */
         if(node getSuperRef() != null) {
+            obj put("extendsFqn", node getSuperRef() getFullName())
             obj put("extends", node getSuperRef() name as String)
         } else {
+            obj put("extendsFqn", null)
             obj put("extends", null)
         }
         /* generic types */
@@ -210,6 +230,7 @@ JSONGenerator: class extends Visitor {
     }
 
     visitCoverDecl: func (node: CoverDecl) {
+        if (node isGenerated) { return }
         obj := HashBag new()
         putToken(obj, node token)
         /* `name` */
@@ -222,19 +243,29 @@ JSONGenerator: class extends Visitor {
         putVersion(node verzion, obj)
         /* `tag` */
         obj put("tag", node name as String)
-        /* `fullName` */
-        obj put("fullName", node underName())
+        /* `nameFqn` */
+        obj put("nameFqn", node underName())
         /* `extends` */
         if(node getSuperRef() != null) {
+            obj put("extendsFqn", node getSuperRef() getFullName())
             obj put("extends", node getSuperRef() name as String)
         } else {
+            obj put("extendsFqn", null)
             obj put("extends", null)
         }
         /* `from` */
         if(node fromType != null) {
             obj put("from", node fromType toString())
+            fromRef := node fromType getRef()
+            match fromRef {
+                case td: TypeDecl =>
+                    obj put("fromFqn", td getFullName())
+                case =>
+                    obj put("fromFqn", "any")
+            }
         } else {
             obj put("from", null)
+            obj put("fromFqn", null)
         }
         /* `members` */
         members := Bag new()
@@ -255,6 +286,7 @@ JSONGenerator: class extends Visitor {
     }
 
     visitFunctionDecl: func (node: FunctionDecl) {
+        if (node isGenerated) { return }
         /* add to the objects. */
         obj := buildFunctionDecl(node, "function")
         addObject(node name, obj)
@@ -303,8 +335,8 @@ JSONGenerator: class extends Visitor {
         else {
             obj put("unmangled", false)
         }
-        /* `fullName` */
-        obj put("fullName", node getFullName())
+        /* `nameFqn` */
+        obj put("nameFqn", node getFullName())
         /* `modifiers` */
         modifiers := Bag new()
         if(node isAbstract())
@@ -324,6 +356,7 @@ JSONGenerator: class extends Visitor {
         obj put("genericTypes", genericTypes)
         /* return type */
         if(node returnType != voidType) {
+            obj put("returnTypeFqn", resolveType(node getReturnType(), true))
             obj put("returnType", resolveType(node getReturnType()))
         } else {
             obj put("returnType", null)
@@ -351,6 +384,7 @@ JSONGenerator: class extends Visitor {
             } else {
                 l add(null)
             }
+            l add(resolveType(arg type, true))
             args add(l)
         }
         obj put("arguments", args)
@@ -358,6 +392,7 @@ JSONGenerator: class extends Visitor {
     }
 
     visitVariableDecl: func (node: VariableDecl) {
+        if (node isGenerated) { return }
         /* add to the objects */
         obj := buildVariableDecl(node, "globalVariable")
         addObject(node name, obj)
@@ -381,8 +416,8 @@ JSONGenerator: class extends Visitor {
         } else {
             obj put("extern", false)
         }
-        /* `fullName` */
-        obj put("fullName", node getFullName())
+        /* `nameFqn` */
+        obj put("nameFqn", node getFullName())
          /* `unmangled` */
         if(node isUnmangled()) {
             if(!node isUnmangledWithName())
@@ -436,6 +471,7 @@ JSONGenerator: class extends Visitor {
         }
         /* `varType` */
         obj put("varType", resolveType(node type))
+        obj put("varTypeFqn", resolveType(node type, true))
         obj
     }
 
@@ -476,7 +512,7 @@ JSONGenerator: class extends Visitor {
             elemInfo put("name", elem name) \
                     .put("tag", "enumElement(%s, %s)" format(node name, elem name)) \
                     .put("type", "enumElement") \
-                    .put("value", elem value toString()) \
+                    .put("value", elem value ? elem value toString() : null) \
                     .put("doc", "")
             if(elem isExtern()) {
                 // see `EnumDecl addElement`, elements always have an extern name if they are extern
@@ -493,7 +529,7 @@ JSONGenerator: class extends Visitor {
         addObject(node name, obj)
     }
 
-    generateFuncTag: func ~funcType (node: FuncType) -> String {
+    generateFuncTag: func ~funcType (node: FuncType, full := false) -> String {
         buf := Buffer new()
         buf append("Func(")
         first := true
@@ -523,7 +559,7 @@ JSONGenerator: class extends Visitor {
                     buf append(',')
                 else
                     first_ = false
-                buf append(resolveType(arg))
+                buf append(resolveType(arg, full))
             }
             buf append(')')
         }
@@ -532,7 +568,7 @@ JSONGenerator: class extends Visitor {
                 buf append(',')
             else
                 first = false
-            buf append("return(%s)" format(resolveType(node returnType)))
+            buf append("return(%s)" format(resolveType(node returnType, full)))
         }
         buf append(')')
         buf toString()

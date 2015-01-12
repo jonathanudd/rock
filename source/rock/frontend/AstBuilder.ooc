@@ -33,6 +33,10 @@ IllegalTypeArgError: class extends Error {
     init: super func ~tokenMessage
 }
 
+InvalidModifierError: class extends Error {
+    init: super func ~tokenMessage
+}
+
 computeReservedHashs: func (words: String[]) -> ArrayList<Int> {
     list := ArrayList<Int> new()
     words length times(|i|
@@ -631,6 +635,8 @@ AstBuilder: class {
     }
 
     onOperatorAbstract: unmangled(nq_onOperatorAbstract) func {
+        checkModifierValidity("abstract", false)
+
         peek(OperatorDecl) setAbstract(true)
     }
 
@@ -663,6 +669,31 @@ AstBuilder: class {
      * Functions
      */
 
+    checkModifierValidity: func(mod: String, allowInAddon? := true) {
+        temp := pop(Node)
+
+        errorOut := func {
+            params errorHandler onError(InvalidModifierError new(temp token, \
+                   "Invalid use of modifier #{mod} outside of a type declaration#{allowInAddon? ? " or extention" : ""}"))
+        }
+
+        match (peek(Node)) {
+            case tDecl: TypeDecl =>
+                // All is fine :D
+            case addon: Addon =>
+                // Hm, there may be an issue there
+                if(!allowInAddon?) {
+                    errorOut()
+                }
+            case =>
+                // Definitely an issue
+                errorOut()
+                
+        }
+
+        stack push(temp)
+    }
+
     onFunctionStart: unmangled(nq_onFunctionStart) func (name, doc: CString) {
         fDecl := FunctionDecl new(name toString(), token())
         fDecl setVersion(getVersion())
@@ -679,12 +710,18 @@ AstBuilder: class {
     }
 
     onFunctionAbstract: unmangled(nq_onFunctionAbstract) func {
+        checkModifierValidity("abstract", false)
+
         peek(FunctionDecl) isAbstract = true
     }
     onFunctionThisRef: unmangled(nq_onFunctionThisRef) func {
+        checkModifierValidity("@")
+
         peek(FunctionDecl) isThisRef = true
     }
     onFunctionStatic: unmangled(nq_onFunctionStatic) func {
+        checkModifierValidity("static")
+
         peek(FunctionDecl) isStatic = true
     }
     onFunctionInline: unmangled(nq_onFunctionInline) func {
@@ -692,6 +729,8 @@ AstBuilder: class {
     }
 
     onFunctionFinal: unmangled(nq_onFunctionFinal) func {
+        checkModifierValidity("final")
+
         peek(FunctionDecl) isFinal = true
     }
 
@@ -700,6 +739,8 @@ AstBuilder: class {
     }
 
     onFunctionSuper: unmangled(nq_onFunctionSuper) func {
+        checkModifierValidity("super", false)
+
         peek(FunctionDecl) isSuper = true
     }
 
@@ -1215,6 +1256,10 @@ AstBuilder: class {
 
     onBinaryRightShift: unmangled(nq_onBinaryRightShift) func (left, right: Expression) -> BinaryOp {
         BinaryOp new(left, right, OpType rshift, token())
+    }
+
+    onNullCoalescing: unmangled(nq_onNullCoalescing) func (left, right: Expression) -> BinaryOp {
+        BinaryOp new(left, right, OpType nullCoal, token())
     }
 
     onLogicalOr: unmangled(nq_onLogicalOr) func (left, right: Expression) -> BinaryOp {

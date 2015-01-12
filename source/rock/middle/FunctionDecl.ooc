@@ -46,6 +46,8 @@ FunctionDecl: class extends Declaration {
     /** The operator declaration this FunctionDecl corresponds to */
     oDecl: OperatorDecl
 
+    isGenerated := false
+
     /** name: func ~suffix - suffix is null if there's no suffix in the grammar */
     name := ""
     suffix: String
@@ -968,6 +970,7 @@ FunctionDecl: class extends Declaration {
         module := trail module()
 
         name = generateTempName(module getUnderName() + "_closure")
+        isGenerated = true
         varAcc := VariableAccess new(name, token)
         varAcc setRef(this)
         module addFunction(this)
@@ -996,6 +999,7 @@ FunctionDecl: class extends Declaration {
 
             // create the context struct's cover
             ctxStruct := CoverDecl new(name + "_ctx", token)
+            ctxStruct isGenerated = true
             ctxStruct fromClosure = true
 
             // look for versioned nodes or VersionBlocks in the trail. If we're using
@@ -1079,6 +1083,7 @@ FunctionDecl: class extends Declaration {
             trail addBeforeInScope(this, closureDecl)
 
             thunk := FunctionDecl new(getName() + "_thunk", token)
+            thunk isGenerated = true
             thunk fromClosure = true
             thunk typeArgs addAll(typeArgs)
             thunk args addAll(args)
@@ -1147,6 +1152,101 @@ FunctionDecl: class extends Declaration {
             res wholeAgain(this, "Unwrapped closure")
         }
 
+    }
+
+    /**
+     * @return the score of decl, respective to this function decl.
+     * This is used to check if function declarations are compatible,
+     * for example to check if an interface function implementation
+     * is compatible with the function signature in the interface decl
+     */
+    getScore: func (decl: FunctionDecl) -> Int {
+        if(debugCondition()) {
+            "** Getting score of #{this} vs #{decl}" println()
+        }
+
+        score := Type SCORE_SEED / 4
+
+        // First things first: MUST share name
+        if(name != decl name) {
+            return Type NOLUCK_SCORE
+        }
+
+        // The two declarations MUST have the same signature
+        if(suffix != decl suffix) {
+            return Type NOLUCK_SCORE
+        }
+
+        // Check argument count
+        // We don't have to worry about varargs etc., since both are declarations
+        if(args getSize() != decl args getSize()) {
+            return Type NOLUCK_SCORE
+        }
+
+        // Check ownership
+        if(owner != null && decl owner != null) {
+            // TODO: Check shit between owners
+            score += Type SCORE_SEED / 4
+        }
+
+        // Check functions are both static
+        if(isStatic == decl isStatic) {
+            score += Type SCORE_SEED / 8
+        }
+
+        // Arguments
+        declIter : Iterator<Argument> = decl args iterator()
+        ourIter : Iterator<Argument> = args iterator()
+
+        while(ourIter hasNext?() && declIter hasNext?()) {
+            declArg := declIter next()
+            ourArg := ourIter next()
+
+            if(declArg getType() == null) {
+                if(debugCondition()) "Score is -1 because of declArg %s\n" format(declArg toString()) println()
+                return -1
+            }
+            if(ourArg getType() == null) {
+                if(debugCondition()) "Score is -1 because of ourArg %s\n" format(ourArg toString()) println()
+                return -1
+            }
+
+            declArgType := declArg getType() refToPointer()
+            typeScore := ourArg getType() getScore(declArgType)
+            if(typeScore == -1) {
+                if(debugCondition()) {
+                    "-1 because of type score between %s and %s" printfln(ourArg getType() toString(), declArgType refToPointer() toString())
+                }
+                return -1
+            }
+
+            score += typeScore
+
+            if(debugCondition()) {
+                "typeScore for %s vs %s == %d    for decl %s (%s vs %s) [%p vs %p]" printfln(
+                    ourArg getType() toString(), declArgType refToPointer() toString(), typeScore, toString(),
+                    ourArg getType() getGroundType() toString(), declArgType refToPointer() getGroundType() toString(),
+                    ourArg getType() getRef(), declArgType getRef())
+            }
+        }
+
+        // Return type
+        typeScore := returnType getScore(decl returnType)
+
+        if(typeScore == -1) {
+            if(debugCondition()) {
+                "-1 because of type score between return types #{returnType} and #{decl returnType}" println()
+            }
+            return -1
+        }
+
+        score += returnType getScore(decl returnType)
+
+        if(debugCondition()) {
+            "Final score = %d" printfln(score)
+        }
+
+        return score
     }
 
     isVoid: func -> Bool { returnType == voidType }

@@ -4,7 +4,7 @@ import Expression, Visitor, Type, Node, FunctionCall, OperatorDecl,
        Import, Module, FunctionCall, ClassDecl, CoverDecl, AddressOf,
        ArrayAccess, VariableAccess, Cast, NullLiteral, PropertyDecl,
        Tuple, VariableDecl, FuncType, TypeDecl, StructLiteral, TypeList,
-       Scope, TemplateDef
+       Scope, TemplateDef, Ternary, Comparison
 import tinker/[Trail, Resolver, Response, Errors]
 
 OpType: enum {
@@ -35,6 +35,8 @@ OpType: enum {
 
     or         /*  || */
     and        /*  && */
+
+    nullCoal   /* ?? */
 }
 
 opTypeRepr := [
@@ -64,7 +66,9 @@ opTypeRepr := [
         "&=",
 
         "||",
-        "&&"]
+        "&&",
+
+        "??"]
 
 BinaryOp: class extends Expression {
 
@@ -109,8 +113,21 @@ BinaryOp: class extends Expression {
     unwrapAssign: func (trail: Trail, res: Resolver) -> Bool {
         if(!isAssign()) return false
 
+        unwrapGetter := func(e: Expression) -> Expression{
+            if(e instanceOf?(VariableAccess) && e as VariableAccess ref instanceOf?(PropertyDecl)) {
+                ep := e as VariableAccess ref as PropertyDecl
+                if(ep inOuterSpace(trail)) {
+                    fCall := FunctionCall new(e as VariableAccess expr, ep getGetterName(), token)
+                    trail push(this)
+                    fCall resolve(trail, res)
+                    trail pop(this)
+                    return fCall
+                }
+            }
+            e
+        }
         innerType := type - (OpType addAss - OpType add)
-        inner := BinaryOp new(left, right, innerType, token)
+        inner := BinaryOp new(unwrapGetter(left), unwrapGetter(right), innerType, token)
         right = inner
         type = OpType ass
 
@@ -377,7 +394,7 @@ BinaryOp: class extends Expression {
                     fCall := FunctionCall new(left as VariableAccess expr, leftProperty getSetterName(), token)
                     fCall getArguments() add(right)
                     trail peek() replace(this, fCall)
-                    return Response OK
+                    return Response LOOP
                 } else {
                     // We're in a setter/getter. This means the property is not virtual.
                     leftProperty setVirtual(false)
@@ -451,10 +468,30 @@ BinaryOp: class extends Expression {
                     // only outside of get/set.
                     unwrapAssign(trail, res)
                     trail push(this)
-                    right resolve(trail, res)
+                    response := right resolve(trail, res)
                     trail pop(this)
+                    if(!response ok()){
+                        return response
+                    }
+                    return Response LOOP
                 }
             }
+        }
+
+        // We must replace the null-coalescing operator with a ternary operator
+        if(type == OpType nullCoal) {
+            // The final expression we want is (left != null ? left : right)
+            condition := Comparison new(left, NullLiteral new(token), CompType notEqual, token)
+            ternary := Ternary new(condition, left, right, token)
+
+            if(!trail peek() replace(this, ternary)) {
+                if(res fatal) res throwError(CouldntReplace new(token, this, ternary, trail))
+                res wholeAgain(this, "failed to replace oneself, gotta try again =)")
+                return Response LOOP
+            }
+
+            res wholeAgain(this, "replaced null coalescing operator with ternary")
+            return Response OK
         }
 
         if(!isLegal(res)) {
