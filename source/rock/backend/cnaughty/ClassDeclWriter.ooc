@@ -217,6 +217,7 @@ ClassDeclWriter: abstract class extends Skeleton {
             }
             FunctionDeclWriter writeSuffixedName(this, fDecl)
             FunctionDeclWriter writeFuncArgs(this, fDecl, ArgsWriteModes NAMES_ONLY, baseClass)
+            //current app(";%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"). closeBlock()
             current app(";"). closeBlock()
 
         }
@@ -229,7 +230,6 @@ ClassDeclWriter: abstract class extends Skeleton {
             if (decl isStatic() || decl isAbstract() || decl isExternWithName()) {
                 continue
             }
-
             current nl(). nl()
             FunctionDeclWriter writeFuncPrototype(this, decl, (decl isFinal()) ? null : "_impl")
             current app(' '). openBlock()
@@ -378,6 +378,7 @@ ClassDeclWriter: abstract class extends Skeleton {
                         if(done contains?(realDecl)) {
                             continue
                         }
+
                         done add(realDecl)
                     }
                 }
@@ -390,9 +391,48 @@ ClassDeclWriter: abstract class extends Skeleton {
                     continue // static funcs aren't written in classes
                 }
 
+               if (realDecl != null && realDecl isOverride() && parentDecl isVirtual()) {
+                  println("found override shit")
+                  //realDecl = null
+                  //writeDesignatedInit(this, parentDecl, realDecl, true)
+                  //continue //
+                }
+                else {
+                  println("no override shit")
+                  // res throwError(InternalError new(token,  string)
+                  realDecl = null
+                }
+
+                if (realDecl != null && realDecl isOverride() && !parentDecl isVirtual()) {
+                    println("illegal")
+                    // res throwError(InternalError new(token,  string)
+                }
+
+                if (parentDecl isVirtual() ) {
+                  println("found virtual shit " )
+                  //continue //
+                }
+              /*
+              if (realDecl == null && parentDecl isAbstract()) {
+                  println("this 1")
+                  writeDesignatedInit(this, parentDecl, realDecl, false)
+                  continue
+                } else {
+                    if (realDecl != null &&!realDecl isOverride()) {
+                      println("this 2" + realDecl toString())
+                      writeDesignatedInit(this, parentDecl, realDecl, true)
+                    }
+                    else {
+                      println("loled")
+                    }
+                }
+                */
+
+
                 if (realDecl == null && parentDecl isAbstract()) {
                     writeDesignatedInit(this, parentDecl, realDecl, false)
                 } else {
+                  println("this 1")
                     writeDesignatedInit(this, parentDecl, realDecl, true)
                 }
             }
@@ -427,7 +467,8 @@ ClassDeclWriter: abstract class extends Skeleton {
 
         decl := realDecl ? realDecl : parentDecl
         FunctionDeclWriter writeFullName(this, decl)
-        if(!decl isExternWithName() && impl) current app("_impl")
+        //if(!decl isExternWithName() && impl) current app("_impl")
+        if(!decl isFinal && !decl isAbstract && !decl isExternWithName() && impl) current app("_impl")
         current app(',')
 
     }

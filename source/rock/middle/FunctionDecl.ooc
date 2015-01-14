@@ -84,6 +84,12 @@ FunctionDecl: class extends Declaration {
     externName : String = null
     unmangledName: String = null
 
+
+    isVirtual := false
+    isOverride := false
+
+
+
     /** if true, 'this' has byref semantics */
     isThisRef := false
 
@@ -194,6 +200,12 @@ FunctionDecl: class extends Declaration {
 
         copy vDecl = vDecl
 
+
+
+        copy isVirtual = isVirtual
+
+        copy isOverride = isOverride
+
         copy
     }
 
@@ -232,6 +244,16 @@ FunctionDecl: class extends Declaration {
     setSuper:   func (=isSuper) {}
 
     isAnon: func -> Bool { isAnon }
+
+
+
+
+    isVirtual: func -> Bool { isVirtual }
+    setVirtual: func (=isVirtual) {}
+
+
+    isOverride: func -> Bool { isOverride }
+    setOverride: func (=isOverride) {}
 
     debugCondition: final func -> Bool {
         false

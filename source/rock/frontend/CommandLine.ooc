@@ -775,4 +775,3 @@ CompilationFailedException: class extends Exception {
         super("Compilation failed!")
     }
 }
-
