@@ -26,6 +26,7 @@ PropertyDecl: class extends VariableDecl {
     setDefaultGetter: func {
         // a default getter just returns the value.
         decl := FunctionDecl new("__defaultGet__", token)
+
         access: VariableAccess
         if(isStatic()) {
             // `This $name`
@@ -60,7 +61,6 @@ PropertyDecl: class extends VariableDecl {
         }
         // get and store the class.
         node := trail peek()
-
         match node {
             case ad: Addon =>
                 if(!ad base) {
@@ -106,7 +106,6 @@ PropertyDecl: class extends VariableDecl {
                 trail pop(getter body)
                 trail pop(getter)
                 trail pop(this)
-
                 match last {
                     case e: Expression =>
                         type = e getType()
@@ -234,4 +233,3 @@ PropertyDecl: class extends VariableDecl {
 InvalidPropertyDecl: class extends Error {
     init: super func ~tokenMessage
 }
-

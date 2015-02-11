@@ -202,7 +202,7 @@ VariableDecl: class extends Declaration {
             if(debugCondition()) "Done resolving the fDecl" println()
         }
 
-        // Check if the expression's type inherits from our type 
+        // Check if the expression's type inherits from our type
         // and add a Cast in that case. (Fixes compiler warnings.)
         // Example: "a: Node = EmptyNode new()
         // => "a: Node = EmptyNode new() as Node

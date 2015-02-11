@@ -206,6 +206,7 @@ FunctionDecl: class extends Declaration {
 
         copy isOverride = isOverride
 
+
         copy
     }
 
@@ -254,6 +255,8 @@ FunctionDecl: class extends Declaration {
 
     isOverride: func -> Bool { isOverride }
     setOverride: func (=isOverride) {}
+
+
 
     debugCondition: final func -> Bool {
         false

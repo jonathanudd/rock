@@ -113,5 +113,3 @@ InterfaceImpl: class extends ClassDecl {
 InterfaceContractNotSatisfied: class extends Error {
     init: super func ~tokenMessage
 }
-
-

@@ -42,7 +42,6 @@ CoverDeclWriter: abstract class extends Skeleton {
     writeGuts: static func (this: Skeleton, cDecl: CoverDecl) {
 
         if(cDecl getVersion()) VersionWriter writeStart(this, cDecl getVersion())
-
         current nl(). app("struct _"). app(cDecl underName()). app(' '). openBlock()
         for(vDecl in cDecl variables) {
             current nl()
@@ -93,4 +92,3 @@ CoverDeclWriter: abstract class extends Skeleton {
     }
 
 }
-
