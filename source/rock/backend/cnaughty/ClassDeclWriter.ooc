@@ -159,7 +159,6 @@ ClassDeclWriter: abstract class extends Skeleton {
         for (decl: FunctionDecl in cDecl functions) {
 
             if (!decl isStatic() || decl isProto() || decl isAbstract()) continue
-            // start of load function
             if(decl isExternWithName()) {
                 FunctionDeclWriter write(this, decl)
                 continue
@@ -187,7 +186,6 @@ ClassDeclWriter: abstract class extends Skeleton {
             for(stat in decl body) {
                 writeLine(stat)
             }
-            // end of load function
             current closeBlock()
 
         }
@@ -199,10 +197,7 @@ ClassDeclWriter: abstract class extends Skeleton {
         if (fDecl isStatic() || fDecl isFinal() || fDecl isExternWithName()) {
           continue
         }
-        if((fDecl name startsWith?("__get")) || (fDecl name startsWith?("__set")) || (fDecl name == "__defaults__") || (fDecl name == "__destroy__") || (fDecl isVirtual()) || (fDecl isOverride()) || (fDecl isAbstract())) { //FREDRIK
-        //if((fDecl name startsWith?("__get")) || (fDecl name startsWith?("__set")) || (fDecl name == "__defaults__") || (fDecl name == "__destroy__") ||(fDecl name == "free") || (fDecl isVirtual()) || (fDecl isOverride()) || (fDecl isAbstract())) { //FREDRIK
-        //if((fDecl name == "__defaults__") || (fDecl name == "__destroy__") ||(fDecl name == "free") || (fDecl isVirtual()) || (fDecl isOverride()) || (fDecl isAbstract())) { //FREDRIK
-        //if((fDecl name == "__defaults__") || (fDecl name == "__destroy__") ||(fDecl name == "free") || (fDecl isVirtual()) || (fDecl isOverride()) || (fDecl isGetOrSet()) || (fDecl isAbstract())) { //FREDRIK
+        if((fDecl name startsWith?("__get")) || (fDecl name startsWith?("__set")) || (fDecl name == "__defaults__") || (fDecl name == "__destroy__") || (fDecl isVirtual()) || (fDecl isOverride()) || (fDecl isAbstract())) {
           current nl(). nl()
           FunctionDeclWriter writeFuncPrototype(this, fDecl)
           current app(' '). openBlock(). nl()
@@ -250,10 +245,7 @@ ClassDeclWriter: abstract class extends Skeleton {
                   current app(' '). openBlock()
                   writeDefaults(this, cDecl)
                 case =>
-                if((decl name startsWith?("__get")) || (decl name startsWith?("__set")) || decl isVirtual() || decl isOverride() ||(decl getName() == "__destroy__")) { // FREDRIK
-                //if((decl name startsWith?("__get")) || (decl name startsWith?("__set")) || decl isVirtual() || decl isOverride() || (decl getName() == "free") ||(decl getName() == "__destroy__")) { // FREDRIK
-                //if(decl isVirtual() || decl isOverride() || (decl getName() == "free") ||(decl getName() == "__destroy__")) { // FREDRIK
-                  //FunctionDeclWriter writeFuncPrototype(this, decl, "_impl")
+                if((decl name startsWith?("__get")) || (decl name startsWith?("__set")) || decl isVirtual() || decl isOverride() ||(decl getName() == "__destroy__")) {
                   FunctionDeclWriter writeFuncPrototype(this, decl, (decl isFinal()) ? null : "_impl")
                   }
                   else {
@@ -412,21 +404,18 @@ ClassDeclWriter: abstract class extends Skeleton {
                 if (parentDecl isStatic()) {
                     continue // static funcs aren't written in classes
                 }
-                //if (realDecl == null && parentDecl isAbstract()) {
                 if (parentDecl isAbstract()) {
                   writeDesignatedInit(this, parentDecl, realDecl, false)
                   continue
                 }
 
-                // FREDRIK
+                // Virtual Override
                 if(parentDecl != null && (parentDecl name startsWith?("__get") || parentDecl name startsWith?("__set"))) {
                   writeDesignatedInit(this, parentDecl, realDecl, true)
                   continue
                 }
 
                 if(realDecl != null && (realDecl name startsWith?("__get") || realDecl name startsWith?("__set"))) {
-                //if(realDecl != null && realDecl isGetOrSet() || (parentDecl != null && parentDecl isGetOrSet())) {
-                //if(parentDecl != null && parentDecl isGetOrSet() && realDecl == null) {
                     writeDesignatedInit(this, parentDecl, realDecl, true)
                     continue
                 }
@@ -445,30 +434,18 @@ ClassDeclWriter: abstract class extends Skeleton {
                     writeDesignatedInit(this, parentDecl, realDecl, true)
                   }
                   else {
-                    //writeDesignatedInit(this, parentDecl, realDecl, false) //WRONG!
                     writeDesignatedInit(this, parentDecl, parentDecl, true)
                   }
                   continue
                 }
-                //if(realDecl != null && (realDecl name == "free") && (parentDecl getFullName() != "lang_types__Object_free") ) {
-                //if(realDecl != null && (parentDecl name == "free") ) {
                 if(realDecl != null && (realDecl name == "free") ) {
                   writeDesignatedInit(this, parentDecl, realDecl, true)
                   continue
-                  // .free = (void*) lang_types__Object_free_impl,
-                  // lang_types__Object_free
                 }
-
-
-                //lang_types__Object___destroy___impl,
-                //if(realDecl != null && ((parentDecl name == "__defaults__") || (parentDecl getFullName() == "lang_types__Object___destroy__"))) {
                 if(realDecl != null && ((parentDecl name == "__defaults__") || (parentDecl name == "__destroy__"))) {
-                  //current app("cccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
                   writeDesignatedInit(this, parentDecl, realDecl, true)
                 }
                 else {if(realDecl == null && ( (parentDecl name ==  "__destroy__") || (parentDecl name ==  "__defaults__") ))
-                //else {if(realDecl == null) {current app("z ")}
-                  //if(parentDecl name ==  "__destroy__") {current app(" eeeeeeeeeeeeeeeeeeeeeeeeeeeeee ")}
                   writeDesignatedInit(this, parentDecl, realDecl, true)
                 }
 
