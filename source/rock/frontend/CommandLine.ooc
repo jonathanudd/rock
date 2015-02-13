@@ -77,6 +77,12 @@ CommandLine: class {
                         params backend = "c"
                     }
 
+
+                } else if (option startsWith?("modulename=")) {
+                  if(!longOption) warnUseLong("modulename")
+                  params moduleName = arg substring(arg indexOf('=') + 1)
+
+
                 } else if (option startsWith?("incpath=")) {
 
                     if(!longOption) warnUseLong("incpath")

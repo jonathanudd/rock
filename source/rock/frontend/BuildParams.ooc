@@ -103,6 +103,9 @@ BuildParams: class {
         libsPaths add(distLocation)
     }
 
+    // Module name
+    moduleName := "ooc-default"
+
     // location of rock's distribution, with a libs/ folder for the gc, etc.
     distLocation: File
 
@@ -469,4 +472,3 @@ OptimizationLevel: enum {
 ParamsError: class extends Exception {
     init: func (=message)
 }
-
