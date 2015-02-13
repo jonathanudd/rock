@@ -374,7 +374,6 @@ ClassDeclWriter: abstract class extends Skeleton {
         } else {
             writeClassStructInitializers(this, parentClass getSuperRef() as ClassDecl, realClass, done, false)
         }
-        println("Imint Rock Compiler")
         if(parentClass != realClass ||
            realClass getNonMeta() == null ||
            !realClass getNonMeta() instanceOf?(InterfaceDecl)) {
