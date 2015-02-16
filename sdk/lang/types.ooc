@@ -17,7 +17,7 @@ Object: abstract class {
     /** return true if *class* is a subclass of *T*. */
     instanceOf?: final func (T: Class) -> Bool {
         if(!this) return false
-
+        
         current := class
         while(current) {
             if(current == T) return true
@@ -100,31 +100,19 @@ Comparable: interface {
  * Closures
  */
 Closure: cover {
-    thunk: Pointer
+    thunk  : Pointer
     context: Pointer
-    dispose: func {
-      if (this context != null)
-      {
-        gc_free(this context)
-        this context = null
-        this thunk = null
-      }
-    }
 }
 
 /** An object storing a value and its class. */
 Cell: class <T> {
     val: T
 
-    init: func(=val)
+    init: func(=val) 
     init: func ~noval
 
     set: func (=val)
     get: func -> T { val }
-    
-    __destroy__: func {
-    	gc_free(this val)
-    }
 }
 
 operator [] <T> (c: Cell<T>, T: Class) -> T {
@@ -133,3 +121,5 @@ operator [] <T> (c: Cell<T>, T: Class) -> T {
     }
     c val
 }
+
+

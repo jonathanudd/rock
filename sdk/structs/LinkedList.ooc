@@ -272,10 +272,6 @@ Node: class <T>{
 
 	/** Initializes the node with previous and next nodes and data. */
 	init: func ~withParams(=prev, =next, =data) {}
-	
-	__destroy__: func {
-		gc_free(data)
-	}
 
 }
 

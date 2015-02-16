@@ -2,8 +2,8 @@ include stdlib, stdint, stddef, float, ctype, sys/types
 
 LLong: cover from signed long long {
 
-    toString:    func -> String { "%lld" formatLLong(this as LLong) }
-    toHexString: func -> String { "%llx" formatLLong(this as LLong) }
+    toString:    func -> String { "%lld" format(this as LLong) }
+    toHexString: func -> String { "%llx" format(this as LLong) }
 
     odd?:  func -> Bool { this % 2 == 1 }
     even?: func -> Bool { this % 2 == 0 }
@@ -35,13 +35,13 @@ LLong: cover from signed long long {
 
 Long:  cover from signed long  extends LLong
 Int:   cover from signed int   extends LLong {
-    toString:    func -> String { "%d" formatInt(this) }
+    toString:    func -> String { "%d" format(this) }
 }
 Short: cover from signed short extends LLong
 
 ULLong: cover from unsigned long long extends LLong {
 
-    toString:    func -> String { "%llu" formatULLong(this as ULLong) }
+    toString:    func -> String { "%llu" format(this as ULLong) }
 
     in?: func(range: Range) -> Bool {
         return this >= range min && this < range max
@@ -51,7 +51,7 @@ ULLong: cover from unsigned long long extends LLong {
 
 ULong:  cover from unsigned long  extends ULLong
 UInt:   cover from unsigned int   extends ULLong {
-    toString:    func -> String { "%u" formatUInt(this) }
+    toString:    func -> String { "%u" format(this) }
 }
 UShort: cover from unsigned short extends ULLong
 
@@ -85,7 +85,7 @@ UInt64: cover from uint64_t extends ULLong
 Octet:  cover from uint8_t
 SizeT:  cover from size_t extends ULLong
 SSizeT:  cover from ssize_t extends LLong {
-    toString:    func -> String { "%u" formatSSizeT(this) }
+    toString:    func -> String { "%u" format(this) }
 }
 PtrDiff: cover from ptrdiff_t extends SSizeT
 
@@ -95,22 +95,22 @@ PtrDiff: cover from ptrdiff_t extends SSizeT
 LDouble: cover from long double {
 
     toString: func -> String {
-        "%.2Lf" formatLDouble(this)
+        "%.2Lf" format(this)
     }
 
-    /*abs: func -> This {
+    abs: func -> This {
         return this < 0 ? -this : this
-    }*/
+    }
 
 }
 Double: cover from double extends LDouble {
     toString: func -> String {
-        "%.2f" formatDouble(this)
+        "%.2f" format(this)
     }
 }
 Float: cover from float extends LDouble {
     toString: func -> String {
-        "%.2f" formatFloat(this)
+        "%.2f" format(this)
     }
 }
 
