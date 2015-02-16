@@ -437,10 +437,10 @@ ClassDeclWriter: abstract class extends Skeleton {
                   }
                   continue
                 }
-                if(realDecl != null && (realDecl name == "free") ) {
+                /*if(realDecl != null && (realDecl name == "free") ) {
                   writeDesignatedInit(this, parentDecl, realDecl, true)
                   continue
-                }
+                }*/
                 if(realDecl != null && ((parentDecl name == "__defaults__") || (parentDecl name == "__destroy__"))) {
                   writeDesignatedInit(this, parentDecl, realDecl, true)
                 }
