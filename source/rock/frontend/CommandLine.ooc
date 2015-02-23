@@ -27,7 +27,7 @@ CommandLine: class {
     mainUseDef: UseDef
 
     init: func(args : ArrayList<String>) {
-
+        println("Cogneco Rock Compiler")
         params = BuildParams new(args[0])
 
         modulePaths := ArrayList<String> new()
@@ -76,6 +76,12 @@ CommandLine: class {
                         "Unknown backend: %s." format(params backend) println()
                         params backend = "c"
                     }
+
+
+                } else if (option startsWith?("modulename=")) {
+                  if(!longOption) warnUseLong("modulename")
+                  params moduleName = arg substring(arg indexOf('=') + 1)
+
 
                 } else if (option startsWith?("incpath=")) {
 
@@ -775,4 +781,3 @@ CompilationFailedException: class extends Exception {
         super("Compilation failed!")
     }
 }
-

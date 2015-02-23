@@ -82,14 +82,14 @@ ModuleWriter: abstract class extends Skeleton {
             current nl(). app("#include <"). app(inc). app(">")
         }
         current nl()
-        
+
         // write the .c part of all global variables
         for(stmt in module body) {
             if(stmt instanceOf?(VariableDecl) && !stmt as VariableDecl getType() instanceOf?(AnonymousStructType)) {
                 vd := stmt as VariableDecl
                 // TODO: add 'local'
                 if(vd isExtern() && !vd isProto()) continue
-                
+
                 current = cw
                 current nl()
                 if(vd isStatic()) current app("static ")
@@ -107,14 +107,14 @@ ModuleWriter: abstract class extends Skeleton {
             if(!tDecl isMeta) continue
             tDecl accept(this)
         }
-        
+
         // write the .h part of all global variables
         for(stmt in module body) {
             if(stmt instanceOf?(VariableDecl) && !stmt as VariableDecl getType() instanceOf?(AnonymousStructType)) {
                 vd := stmt as VariableDecl
                 // TODO: add 'local'
                 if(vd isExtern() && !vd isProto()) continue
-                
+
                 if(!vd isStatic()) {
                     current = fw
                     current nl(). app("extern ")
@@ -159,7 +159,6 @@ ModuleWriter: abstract class extends Skeleton {
         }
         current untab(). nl(). app("}")
         current untab(). nl(). app("}"). nl()
-
         // write all addons
         for(addon in module addons) {
             addon accept(this)
@@ -306,7 +305,7 @@ ModuleWriter: abstract class extends Skeleton {
         match (inc mode) {
             case IncludeMode MACRO =>
                 // muffin to do.
-            case => 
+            case =>
                 current app("<")
         }
 
@@ -319,7 +318,7 @@ ModuleWriter: abstract class extends Skeleton {
         match (inc mode) {
             case IncludeMode MACRO =>
                 // muffin to do
-            case => 
+            case =>
                 current app(".h>")
         }
 

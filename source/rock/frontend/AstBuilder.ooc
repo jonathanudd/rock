@@ -72,8 +72,8 @@ AstBuilder: class {
         versionStack = Stack<VersionSpec> new()
 
         module addUse(Use new("sdk", params, module token))
-
         result := nq_parse(this, modulePath)
+
         if(result == -1) {
             Exception new(This, "File " +modulePath + " not found") throw()
         }
@@ -298,6 +298,7 @@ AstBuilder: class {
         cDecl module = module
         stack push(cDecl)
     }
+
 
     onClassExtends: unmangled(nq_onClassExtends) func (superType: Type) {
         peek(ClassDecl) setSuperType(superType)
@@ -688,7 +689,7 @@ AstBuilder: class {
             case =>
                 // Definitely an issue
                 errorOut()
-                
+
         }
 
         stack push(temp)
@@ -730,7 +731,6 @@ AstBuilder: class {
 
     onFunctionFinal: unmangled(nq_onFunctionFinal) func {
         checkModifierValidity("final")
-
         peek(FunctionDecl) isFinal = true
     }
 
@@ -740,7 +740,6 @@ AstBuilder: class {
 
     onFunctionSuper: unmangled(nq_onFunctionSuper) func {
         checkModifierValidity("super", false)
-
         peek(FunctionDecl) isSuper = true
     }
 
@@ -776,6 +775,17 @@ AstBuilder: class {
                 addon addFunction(fDecl)
         }
         return fDecl
+    }
+
+
+
+    onFunctionVirtual: unmangled(nq_onFunctionVirtual) func {
+      checkModifierValidity("virtual", false)
+      peek(FunctionDecl) isVirtual = true
+    }
+    onFunctionOverride: unmangled(nq_onFunctionOverride) func {
+      checkModifierValidity("override", false)
+      peek(FunctionDecl) isOverride = true
     }
 
     /*
@@ -1404,4 +1414,3 @@ nq_error: unmangled func (this: AstBuilder, errorID: Int, message: CString, inde
 SyntaxError: class extends Error {
     init: super func ~tokenMessage
 }
-

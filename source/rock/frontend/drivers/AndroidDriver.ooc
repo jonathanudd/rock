@@ -129,7 +129,7 @@ AndroidDriver: class extends Driver {
 
 			fw write("include $(CLEAR_VARS)\n")
 			fw write("\n")
-			fw write("LOCAL_MODULE := "). write("ooc"). write("\n")
+			fw write("LOCAL_MODULE := "). write(params moduleName). write("\n")
 			fw write("LOCAL_C_INCLUDES := ")
 			for(sourceFolder in sourceFolders) {
 				deps := collectSourceFolders(sourceFolder)
