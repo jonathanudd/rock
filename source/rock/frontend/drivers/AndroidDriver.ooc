@@ -142,8 +142,6 @@ AndroidDriver: class extends Driver {
 				if(this params defines[i] != "__OOC_DEBUG__")
 					fw write("\n"). write("LOCAL_CFLAGS += -D" + this params defines[i]). write("\n")
 			}
-			fw write("\n"). write("LOCAL_CFLAGS += -DNDEBUG"). write("\n")
-			fw write("\n"). write("LOCAL_CFLAGS += -O2"). write("\n")
 
 			for(sourceFolder in sourceFolders) {
 				uses := collectUses(sourceFolder)
