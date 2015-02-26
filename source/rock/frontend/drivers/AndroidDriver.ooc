@@ -143,6 +143,9 @@ AndroidDriver: class extends Driver {
 					fw write("\n"). write("LOCAL_CFLAGS += -D" + this params defines[i]). write("\n")
 			}
 
+			for(i in 0..this params compilerArgs size)
+				fw write("\n"). write("LOCAL_CFLAGS += -" + this params compilerArgs[i]). write("\n")
+
 			for(sourceFolder in sourceFolders) {
 				uses := collectUses(sourceFolder)
 				for (useDef in uses) {
