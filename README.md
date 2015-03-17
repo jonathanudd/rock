@@ -20,6 +20,18 @@ You need the following packages when building rock:
 * tar (for extracting the C sources)
 * bzip2 (used by tar)
 
+## Build Cogneco version of rock with fasterthanlime version
+
+* Build rock from https://github.com/fasterthanlime/rock by following the 'Get started' guide below.
+* Create a copy of the rock binary namned safe_rock by running `make backup`
+* Go to the rock folder cloned from https://github.com/cogneco/rock
+* Create a folder called  'bin'.
+* Copy safe_rock into the 'bin' folder.
+* Run `make safe` to build rock.
+
+Cogneco version of rock builds itself but it has not been tested.
+
+
 ## Get started
 
 Run `make rescue` and you're good.
