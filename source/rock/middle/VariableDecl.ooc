@@ -24,6 +24,7 @@ VariableDecl: class extends Declaration {
     isProto := false
     externName: String = null
     unmangledName: String = null
+    isForcedMalloc := false
 
     /** if this VariableDecl is a Func, it can be called! */
     fDecl : FunctionDecl = null
@@ -58,6 +59,7 @@ VariableDecl: class extends Declaration {
         copy externName    = externName
         copy unmangledName = unmangledName
         copy fDecl         = fDecl
+        copy isForcedMalloc = isForcedMalloc
         copy
     }
 
@@ -95,7 +97,9 @@ VariableDecl: class extends Declaration {
     setStatic: func (=isStatic) {}
 
     isConst: func -> Bool { isConst }
+    isForcedMalloc: func -> Bool { isForcedMalloc}
     setConst: func (=isConst) {}
+    setForcedMalloc: func (=isForcedMalloc) {}
 
     isProto: func -> Bool { isProto }
     setProto: func (=isProto) { "%s is now proto!" format(name) println() }
@@ -304,6 +308,7 @@ VariableDecl: class extends Declaration {
             if(debugCondition()) "Generic, set expr to malloc" println()
             if(expr != null) {
                 if(expr instanceOf?(FunctionCall) && expr as FunctionCall getName() == "gc_malloc") return Response OK
+                if(expr instanceOf?(FunctionCall) && expr as FunctionCall getName() == "alloca") return Response OK
 
                 ass := BinaryOp new(VariableAccess new(this, token), expr, OpType ass, token)
                 if(!trail addAfterInScope(this, ass)) {
@@ -311,7 +316,13 @@ VariableDecl: class extends Declaration {
                 }
                 expr = null
             }
-            fCall := FunctionCall new("gc_malloc", token)
+            fCall: FunctionCall
+            if(isForcedMalloc) {
+              fCall = FunctionCall new("gc_malloc", token)
+            }
+            else {
+              fCall = FunctionCall new("alloca", token)
+            }
             tAccess := VariableAccess new(type getName(), token)
             sizeAccess := VariableAccess new(tAccess, "size", token)
             fCall getArguments() add(sizeAccess)

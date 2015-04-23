@@ -776,8 +776,9 @@ AstBuilder: class {
         }
         return fDecl
     }
-
-
+    onVarDeclForcedMalloc: unmangled(nq_onVarDeclForcedMalloc) func {
+        peek(Stack<VariableDecl>) each(|vd| vd setForcedMalloc(true))
+    }
 
     onFunctionVirtual: unmangled(nq_onFunctionVirtual) func {
       checkModifierValidity("virtual", false)
