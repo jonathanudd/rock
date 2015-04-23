@@ -1,0 +1,1786 @@
+%{
+#include <stdio.h>
+#include <string.h>
+#include <stdbool.h>
+
+// workaround for peg/leg/greg's shady parsing of "{}" even in
+// character class literals
+#define _OBRACK '{'
+#define _CBRACK '}'
+#define _OSBRACK "{"
+#define _CSBRACK "}"
+
+#ifdef __OOC_USE_GC__
+
+void *GC_malloc(size_t);
+void *GC_calloc(size_t, size_t);
+void *GC_realloc(void *, size_t);
+void GC_free(void *);
+
+#define YY_ALLOC(N, D)      GC_malloc(N)
+#define YY_CALLOC(N, S, D)  GC_malloc((N) * (S))
+#define YY_REALLOC(B, N, D) GC_realloc(B, N)
+#define YY_FREE             GC_free
+
+#else
+
+#define YY_ALLOC(N, D)      malloc(N)
+#define YY_CALLOC(N, S, D)  calloc(N, S)
+#define YY_REALLOC(B, N, D) realloc(B, N)
+#define YY_FREE             free
+
+#endif
+
+#define tokenPos { core->token[0] = thunk->begin + G->offset; core->token[1] = (thunk->end - thunk->begin); }
+#define tokenPosPlusOne { core->token[0] = thunk->begin + G->offset + 1; core->token[1] = (thunk->end - thunk->begin); }
+
+#define rewindWhiteSpace { \
+    /* only rewind if at end of file */ \
+    if (core->eof == 1) { \
+      int originalPos = G->pos; \
+      char *c = G->buf + G->pos; \
+      /* rewind until we reach something non-whitespace */ \
+      while (G->pos > 0) { \
+        c--; G->pos--; \
+        char cc = *c; \
+        if (!((cc) == ' ' || (cc) == '\t' || (cc) == '\n' || (cc) == '\r')) break; \
+      } \
+    } \
+}
+
+// Throw error at current parsing pos. Used when nothing valid matches.
+#define throwError(val, message) \
+    nq_error(core->this, (val), (message), G->pos + G->offset)
+
+// Throw error at last matched token pos. Used with invalid tokens being
+// parsed for more helpful messages (e.g. misplaced suffixes).
+#define throwTokenError(val, message) \
+    nq_error(core->this, (val), (message), core->token[0])
+
+#define missingOp(c) { \
+    rewindWhiteSpace; \
+    char message[2048]; \
+    snprintf(message, 2048, "Missing right operand for '%s' operator!\n", (c)); \
+    throwError(NQE_MISSING_OPERAND, message); \
+}
+
+#define YYSTYPE void*
+
+// the default is 1024, but it causes buffers to be reallocated 4 or 5
+// times during the parsing. This is a better default for us, only a few
+// modules need to reallocate with that setting
+#define YY_BUFFER_START_SIZE 16384
+
+// in old peg/leg versions, this was set to 32, but it's wayyy too small
+// for a non-trivial grammar like ooc's
+#define YY_STACK_SIZE YY_BUFFER_START_SIZE
+
+//#define YY_DEBUG
+
+///////////////////// re-entrant data structures ////////////////////////
+
+typedef int (*_NagaQueenIoInterface_read)(void *, size_t, void *);
+struct _NagaQueenIoInterface {
+    _NagaQueenIoInterface_read read;
+};
+
+struct _NagaQueenCore {
+    /* The user's data */
+    void *this;
+    /* Current line number */
+    int yylineno;
+    /* Path of the file we're parsing. */
+    char* path;
+    /* The stream we're reading from. */
+    void *stream;
+    /* Length of the stream (only used for memory streams) */
+    size_t streamlen;
+    /* Offset in the stream (only used for memory streams) */
+    size_t streamoffset;
+    /* our IO interface */
+    struct _NagaQueenIoInterface io;
+    /* The begin position and length of the current token in the text */
+    int token[2];
+    /* type parsing buffer */
+    char typeBuffer[4096];
+    /* import quantity */
+    int importQuantity;
+    /* 0 if still reading file, 1 if eof */
+    int eof;
+};
+
+typedef struct _NagaQueenCore NagaQueenCore;
+
+///////////////////// IO interface: supports memory + files ////////////////////////
+
+static int _nq_memread(void *ptr, size_t size, NagaQueenCore *core) {
+    char *source = (char *) core->stream;
+    size_t tocopy = size;
+    size_t remaining = core->streamlen - core->streamoffset;
+    if (tocopy > remaining) {
+      tocopy = remaining;
+    }
+    memcpy(ptr, source + core->streamoffset, tocopy);
+    core->streamoffset += tocopy;
+    return (int) tocopy;
+}
+
+static int _nq_fread(void *ptr, size_t size, NagaQueenCore *core) {
+    FILE *stream = (FILE *) core->stream;
+    return fread(ptr, 1, size, (FILE*) stream);
+}
+
+
+#define YY_XTYPE NagaQueenCore *
+#define YY_XVAR core
+
+#define YY_INPUT(buf, result, max_size, core) yyInput(buf, &result, max_size, core)
+
+void yyInput(char *buf, int *result, int max_size, NagaQueenCore *core) {
+    (*result) = core->io.read(buf, max_size, core);
+    if((*result) == 0 && core->eof == 0) {
+        core->eof = 1;
+        (*buf) = '\n';
+        (*result) = 1;
+        return;
+    }
+    for(int i = 0; i < (*result) - 1; i++) {
+        // if we encounter a line separation ('\' followed by EOL),
+        // replace both the '\' and the EOL (CRLF or LF) with spaces -
+        // it won't hurt the parsing and is faster than memmov-ing the
+        // rest of the buffer in place.
+        if(buf[i] == '\\') {
+            if(buf[i+1] == '\r') {
+                buf[i] = ' ';
+                buf[i+1] = ' ';
+                if(buf[i+2] == '\n') {
+                    // CRLF (Win32)
+                    buf[i+2] = ' ';
+                    i += 2; continue;
+                }
+                // CR (AIX?)
+                i += 1; continue;
+            } else if(buf[i+1] == '\n') {
+                // LF (Linux, Mac)
+                buf[i] = ' ';
+                buf[i+1] = ' ';
+                i += 1; continue;
+            }
+        }
+    }
+}
+
+///////////////////// callbacks def start, you may want to skip this ////////////////////////
+
+
+void nq_onVarDeclForcedMalloc(void *this);
+void nq_onFunctionVirtual(void *this);
+void nq_onFunctionOverride(void *this);
+
+void nq_setTokenPositionPointer(void *this, int *tokenPosPointer, int *lineNoPointer);
+
+char *nq_StringClone(char *string);
+char *nq_trailingQuest(char *string);
+char *nq_trailingBang (char *string);
+
+void nq_onUse(void *this, char *name);
+void nq_onInclude(void *this, char *path);
+void nq_onIncludeDefine(void *this, char *name, char *value);
+void nq_onImport (void *this, char *path, char *name);
+void nq_onImportNamespace(void *this, char *namespace, int quantity);
+
+void *nq_onVersionName(void *this, char *name);
+void *nq_onVersionNegation(void *this, void *spec);
+void *nq_onVersionAnd(void *this, void *specLeft, void *specRight);
+void *nq_onVersionOr(void *this, void *specLeft, void *specRight);
+
+void nq_onVersionStart(void *this, void *spec);
+void *nq_onVersionElseIfStart(void *this, void *notSpec, void *elseSpec);
+void nq_onVersionElseStart(void *this, void *notSpec);
+void *nq_onVersionEnd(void *this);
+
+void nq_onExtendStart(void *this, void *type, char *doc);
+void nq_onExtendEnd(void *this);
+
+void nq_onCoverStart(void *this, char *name, char *doc);
+void nq_onCoverExtern(void *this, char *externName);
+void nq_onCoverProto(void *this);
+void nq_onCoverFromType(void *this, void *type);
+void nq_onCoverExtends(void *this, void *type);
+void nq_onCoverImplements(void *this, void *type);
+void nq_onCoverEnd(void *this);
+
+void nq_onEnumStart(void *this, char *name, char *doc);
+void nq_onEnumExtern(void *this, char *externName);
+void nq_onEnumFromType(void *this, void *fromType);
+void nq_onEnumIncrementExpr(void *this, char oper, void *step);
+void nq_onEnumElementStart(void *this, char *name, char *doc);
+void nq_onEnumElementValue(void *this, void *value);
+void nq_onEnumElementExtern(void *this, char *externName);
+void nq_onEnumElementEnd(void *this);
+void nq_onEnumEnd(void *this);
+
+void nq_onClassStart(void *this, char *name, char *doc);
+void nq_onClassAbstract(void *this);
+void nq_onClassFinal(void *this);
+void nq_onClassExtends(void *this, void *type);
+void nq_onClassImplements(void *this, void *type);
+void nq_onClassBody(void *this);
+void nq_onClassEnd(void *this);
+
+void nq_onInterfaceStart(void *this, char *name, char *doc);
+void nq_onInterfaceExtends(void *this, void *type);
+void nq_onInterfaceEnd(void *this);
+
+void nq_onPropertyDeclStart(void *this, char *name, char *doc);
+void nq_onPropertyDeclStatic(void *this);
+void nq_onPropertyDeclType(void *this, void *type);
+void *nq_onPropertyDeclEnd(void *this);
+
+void nq_onPropertyDeclGetterStart(void *this, char *doc);
+void *nq_onPropertyDeclGetterEnd(void *this);
+
+void nq_onPropertyDeclSetterStart(void *this, char *doc);
+void nq_onPropertyDeclSetterArgument(void *this, char *name, _Bool conventional);
+void *nq_onPropertyDeclSetterEnd(void *this);
+
+void nq_onVarDeclStart(void *this);
+void nq_onVarDeclName(void *this, char *name, char *doc);
+void nq_onVarDeclTuple(void *this, void *tuple);
+void nq_onVarDeclExtern(void *this, char *externName);
+void nq_onVarDeclUnmangled(void *this, char *unmangledName);
+void nq_onVarDeclExpr(void *this, void *expr);
+void nq_onVarDeclType(void *this, void *type);
+void nq_onVarDeclStatic(void *this);
+void nq_onVarDeclConst(void *this);
+void nq_onVarDeclProto(void *this);
+void *nq_onVarDeclEnd(void *this);
+
+void *nq_onTypeAccess(void *this, void *type);
+
+void *nq_onTypeNew(void *this, char *name);     // $$=nq_onTypeNew(yytext)
+void *nq_onTypePointer(void *this, void *type);   // $$=nq_onTypePointer($$)
+void *nq_onTypeReference(void *this, void *type); // $$=nq_onTypeReference($$)
+void *nq_onTypeBrackets(void *this, void *type, void *inner); // $$=nq_onTypeBrackets($$, inner)
+void nq_onTypeGenericArgument(void *this, void *type, void *genType);
+void nq_onFuncTypeGenericArgument(void *this, void *type, char *name);
+void *nq_onTypeList(void *this);
+void *nq_onTypeListElement(void *this, void *list, void *elem);
+void nq_onTypeNamespace(void *this, void *type, void *ident);
+
+void *nq_onFuncTypeNew(void *this);
+void nq_onFuncTypeArgument(void *this, void *funcType, void *argType);
+void nq_onFuncTypeVarArg(void *this, void *funcType);
+void nq_onFuncTypeReturnType(void *this, void *funcType, void *returnType);
+
+void nq_onOperatorStart(void *this);
+void nq_onOperatorAbstract(void *this);
+void nq_onOperatorByref(void *this);
+void nq_onOperatorSymbol(void *this, char *symbol);
+void nq_onOperatorBodyStart(void *this);
+void nq_onOperatorEnd(void *this);
+
+void nq_onFunctionStart(void *this, char *name, char *doc);
+void nq_onFunctionExtern(void *this, char *externName);
+void nq_onFunctionUnmangled(void *this, char *unmangledName);
+void nq_onFunctionAbstract(void *this);
+void nq_onFunctionThisRef(void *this);
+void nq_onFunctionArgsStart(void *this);
+void nq_onFunctionArgsEnd(void *this);
+void nq_onFunctionReturnType(void *this, void *type);
+void nq_onFunctionConst(void *this);
+void nq_onFunctionStatic(void *this);
+void nq_onFunctionInline(void *this);
+void nq_onFunctionFinal(void *this);
+void nq_onFunctionProto(void *this);
+void nq_onFunctionSuper(void *this);
+void nq_onFunctionSuffix(void *this, char *name);
+void nq_onFunctionBody(void *this);
+void *nq_onFunctionEnd(void *this);
+
+void nq_onTypeArg(void *this, void *type);
+void nq_onVarArg(void *this, char *name);
+void nq_onDotArg(void *this, char *name);
+void nq_onAssArg(void *this, char *name);
+
+void nq_onFunctionCallStart(void *this, char *yytext);
+void nq_onFunctionCallSuffix(void *this, char *yytext);
+void nq_onFunctionCallArg(void *this, void *expr);
+void *nq_onFunctionCallEnd(void *this);
+void nq_onFunctionCallExpr(void *this, void *call, void *expr);
+void *nq_onFunctionCallChain(void *this, void *expr, void *call);
+void *nq_onFunctionCallCombo(void *this, void *call, void *expr);
+
+void nq_onArrayLiteralStart(void *this);
+void *nq_onArrayLiteralEnd(void *this);
+
+void nq_onTupleStart(void *this);
+void *nq_onTupleEnd(void *this);
+
+void nq_onRawStringLiteral(void *this, void *object);
+
+void nq_onStringLiteralStart(void *this);
+void nq_onStringInterpolation(void *this, void *expression);
+void nq_onStringTextChunk(void *this, char *chunck);
+void *nq_onStringLiteralEnd(void *this);
+
+void *nq_onCharLiteral(void *this, char *value);
+
+void nq_onStatement(void *this, void *statement);
+void *nq_onReturn(void *this, void *expr);
+
+void *nq_onVarAccess(void *this, void *expr, char *name);
+void nq_onArrayAccessStart(void *this, void *array);
+void *nq_onArrayAccessEnd(void *this);
+void *nq_onCast(void *this, void *expr, void *type);
+
+void *nq_onBreak(void *this);
+void *nq_onContinue(void *this);
+
+void nq_onBlockStart(void *this);
+void *nq_onBlockEnd(void *this);
+
+void nq_onIfStart(void *this, void *condition);
+void *nq_onIfEnd(void *this);
+void nq_onElseStart(void *this);
+void *nq_onElseEnd(void *this);
+
+void nq_onForeachStart(void *this, void *decl, void *collec);
+void *nq_onForeachEnd(void *this);
+
+void nq_onWhileStart(void *this, void *condition);
+void *nq_onWhileEnd(void *this);
+
+void *nq_onEquals(void *this, void *left, void *right);
+void *nq_onNotEquals(void *this, void *left, void *right);
+void *nq_onLessThan(void *this, void *left, void *right);
+void *nq_onMoreThan(void *this, void *left, void *right);
+void *nq_onCmp(void *this, void *left, void *right);
+void *nq_onLessThanOrEqual(void *this, void *left, void *right);
+void *nq_onMoreThanOrEqual(void *this, void *left, void *right);
+
+void *nq_onDecLiteral(void *this, char *value);
+void *nq_onBinLiteral(void *this, char *value);
+void *nq_onOctLiteral(void *this, char *value);
+void *nq_onHexLiteral(void *this, char *value);
+void *nq_onFloatLiteral(void *this, char *value);
+void *nq_onBoolLiteral(void *this, bool value);
+void *nq_onNull(void *this);
+
+void *nq_onDoubleArrow(void *this, void *left, void *right);
+void *nq_onTernary(void *this, void *condition, void *ifTrue, void *ifFalse);
+void *nq_onAssignAnd(void *this, void *left, void *right);
+void *nq_onAssignOr(void *this, void *left, void *right);
+void *nq_onAssignXor(void *this, void *left, void *right);
+void *nq_onAssignRightShift(void *this, void *left, void *right);
+void *nq_onAssignLeftShift(void *this, void *left, void *right);
+void *nq_onAssignDiv(void *this, void *left, void *right);
+void *nq_onAssignMul(void *this, void *left, void *right);
+void *nq_onAssignExp(void *this, void *left, void *right);
+void *nq_onAssignSub(void *this, void *left, void *right);
+void *nq_onAssignAdd(void *this, void *left, void *right);
+void *nq_onAssign(void *this, void *left, void *right);
+
+void *nq_onAdd(void *this, void *left, void *right);
+void *nq_onSub(void *this, void *left, void *right);
+void *nq_onMod(void *this, void *left, void *right);
+void *nq_onMul(void *this, void *left, void *right);
+void *nq_onExp(void *this, void *left, void *right);
+void *nq_onDiv(void *this, void *left, void *right);
+void *nq_onRangeLiteral(void *this, void *left, void *right);
+void *nq_onBinaryLeftShift(void *this, void *left, void *right);
+void *nq_onBinaryRightShift(void *this, void *left, void *right);
+void *nq_onNullCoalescing(void *this, void *left, void *right);
+void *nq_onLogicalOr(void *this, void *left, void *right);
+void *nq_onLogicalAnd(void *this, void *left, void *right);
+void *nq_onBinaryOr(void *this, void *left, void *right);
+void *nq_onBinaryXor(void *this, void *left, void *right);
+void *nq_onBinaryAnd(void *this, void *left, void *right);
+
+void *nq_onLogicalNot(void *this, void *inner);
+void *nq_onBinaryNot(void *this, void *inner);
+void *nq_onUnaryMinus(void *this, void *inner);
+void *nq_onUnaryPlus(void *this, void *inner);
+
+void *nq_onParenthesis(void *this, void *inner);
+
+void nq_onGenericArgument(void *this, char *name);
+
+void *nq_onAddressOf  (void *this, void *inner);
+void *nq_onDereference(void *this, void *inner);
+
+void nq_onMatchStart(void *this);
+void nq_onMatchExpr(void *this, void *value);
+void *nq_onMatchEnd(void *this);
+void nq_onCaseStart(void *this);
+void nq_onCaseExpr(void *this, void *value);
+void nq_onCaseEnd(void *this);
+
+void nq_onTryStart(void *this);
+void *nq_onTryEnd(void *this);
+void nq_onCatchStart(void *this);
+void nq_onCatchExpr(void *this, void *value);
+void nq_onCatchEnd(void *this);
+
+void nq_error(void *this, int errorID, char *defaultMessage, int index);
+
+// Templates
+
+void nq_onTemplateStart(void *this);
+void nq_onTemplateEnd(void *this);
+
+/////////////////////                callbacks def end               ////////////////////////
+
+/////////////////////                 error IDs start                ////////////////////////
+
+// NQE stands for 'NagaQueen Error"
+
+enum NagaQueenError {
+    NQE_EXP_STATEMENT_OR_CLOSING_BRACKET = 1,
+    NQE_EXP_INC_IMP_STMT_OR_DECL,
+    NQE_EXP_CASE_IN_MATCH,
+    NQE_EXP_VAR_OR_FUNC_DECL,
+    NQE_EXP_ENUM_ELEMENT,
+    NQE_EXP_RET_TYPE,
+    NQE_EXP_CLOSING_PAREN,
+    NQE_EXP_CLOSING_SQUAR,
+    NQE_EXP_CLOSING_BRACK,
+    NQE_EXP_DOUBLE_ARROW,
+    NQE_EXP_ARG,
+    NQE_UNCLOSED_COMMENT,
+    NQE_MISSING_OPERAND,
+    NQE_MISPLACED_SUFFIX,
+    NQE_MALFORMED_STRINGLIT,
+    NQE_MALFORMED_CHARLIT,
+    NQE_MALFORMED_TERNARY,
+};
+
+/////////////////////                  error IDs end                 ////////////////////////
+
+%}
+
+Module  =  ModuleCore
+          | WS ( !EOL . )*
+          EOL { tokenPos; char *message = "Expected include, import, statement or declaration\n";
+            if(G->buf[core->token[0]] == _CBRACK) { message = "Unmatched closing bracket\n"; }
+            throwTokenError(NQE_EXP_INC_IMP_STMT_OR_DECL, message);
+          }
+
+ModuleCore = (WS 'version' { tokenPos }
+              WS '('
+              - spec: VersionSpec
+              WS CLOS_PAREN ~{ rewindWhiteSpace; throwError(NQE_EXP_CLOSING_PAREN, "Malformed version spec!\n") }
+              ((
+              - '{' { nq_onVersionStart(core->this, spec) }
+              WS ModuleCore* WS
+              - CLOS_BRACK ~{ rewindWhiteSpace; throwError(NQE_EXP_INC_IMP_STMT_OR_DECL, "Expected include, import, statement or declaration\n") } { nq_onVersionEnd(core->this) }
+              )
+              |
+              (
+              - s:Stmt { nq_onVersionStart(core->this, spec); nq_onStatement(core->this, s); nq_onVersionEnd(core->this) }
+              ))
+              (
+                  WS 'else' - 'version' { tokenPos }
+                  WS '('
+                  - elseSpec: VersionSpec
+                  WS ')'
+                  ((
+                  - '{' { spec = nq_onVersionElseIfStart(core->this, spec, elseSpec) }
+                  WS ModuleCore* WS
+                  - CLOS_BRACK ~{ rewindWhiteSpace; throwError(NQE_EXP_INC_IMP_STMT_OR_DECL, "Expected include, import, statement or declaration\n") } { nq_onVersionEnd(core->this) }
+                  )
+                  |
+                  (
+                  - s:Stmt { spec = nq_onVersionElseIfStart(core->this, spec, elseSpec); nq_onStatement(core->this, s); nq_onVersionEnd(core->this) }
+                  ))
+              )*
+              (
+                  WS 'else' { tokenPos }
+                  ((
+                  - '{' { nq_onVersionElseStart(core->this, spec) }
+                  WS ModuleCore* WS
+                  - CLOS_BRACK ~{ rewindWhiteSpace; throwError(NQE_EXP_INC_IMP_STMT_OR_DECL, "Expected include, import, statement or declaration\n") } { nq_onVersionEnd(core->this) }
+                  )
+                  |
+                  (
+                  - s:Stmt { nq_onVersionElseStart(core->this, spec); nq_onStatement(core->this, s); nq_onVersionEnd(core->this) }
+                  ))
+              )?
+            )
+          |(WS Include WS
+          | WS Import WS
+          | WS Use WS
+          | WS Decl WS
+          | WS stmt:Stmt WS { nq_onStatement(core->this, stmt) }
+          )
+
+VersionSpec = ((- '(' - l:VersionSpec - ')') | (l:VersionCore))
+                ((- '&&' { tokenPos; } - r:VersionSpec { l=$$=nq_onVersionAnd(core->this, l, r); }) |
+                 (- '||' { tokenPos; } - r:VersionSpec { l=$$=nq_onVersionOr (core->this, l, r); }))*
+
+VersionCore = (VersionNegation | VersionName)
+
+VersionName = - < [a-zA-Z0-9_]+ > { tokenPos; $$=nq_onVersionName(core->this, yytext) }
+VersionNegation = - '!' { tokenPos; } - spec:VersionSpec { $$=nq_onVersionNegation(core->this, spec) }
+
+Use = USE_KW [ \t]
+      - UseCore
+      (
+      - ','
+      - UseCore
+      )*
+
+UseCore = < ([A-Za-z0-9/._] | '-')+ > { tokenPos; nq_onUse(core->this, nq_StringClone(yytext)) }
+
+Include = INCLUDE_KW [ \t]
+          - IncludeCore
+          (
+          - ','
+          - IncludeCore
+          )*
+
+DefineName  = < ([A-Za-z0-9_/._] | '-')+ > { $$=nq_StringClone(yytext) }
+DefineValue = ('=' < ([A-Za-z0-9_/._] | '-')+ >)? { $$=nq_StringClone(yytext) }
+            | { $$=""; }
+
+IncludeCore = < ([A-Za-z0-9/._] | '-')+ >  { tokenPos; nq_onInclude(core->this, nq_StringClone(yytext)) }
+          (- '|'
+           - '('
+            - defineName:DefineName defineVal:DefineValue { nq_onIncludeDefine(core->this, defineName, defineVal) }
+           (- ','
+            - defineName:DefineName defineVal:DefineValue { nq_onIncludeDefine(core->this, defineName, defineVal) }
+           )*
+           - ')'
+          )?
+
+Import  = IMPORT_KW [ \t]
+          - ImportAtom
+          (
+          ',' WS
+          - ImportAtom
+          )*
+
+ImportAtom = path:ImportPath
+            ((name:ImportName { tokenPosPlusOne; }             { nq_onImport(core->this, (char*) path, (char*) name) }
+             (- INTO_KW - namespace:IDENT               { nq_onImportNamespace(core->this, (char*) namespace, 1) })?
+             ) | (
+            '[' { core->importQuantity = 0; }
+            (name:ImportName { tokenPosPlusOne; } - ',' WS   { core->importQuantity++; nq_onImport(core->this, (char*) path, (char*) name) })*
+            (name:ImportName { tokenPosPlusOne; }              { core->importQuantity++; nq_onImport(core->this, (char*) path, (char*) name) })
+            ']'
+             (- INTO_KW - namespace:IDENT               { nq_onImportNamespace(core->this, (char*) namespace, core->importQuantity) })?
+            ))
+
+ImportPath = < (([A-Za-z_0-9] | "." | "-")+ "/")* > { $$=nq_StringClone(yytext) }
+ImportName = < ([A-Za-z_0-9] | "-")+ >                { $$=nq_StringClone(yytext) }
+
+
+Decl    = ( ClassDecl
+          | CoverDecl
+          | ExtendDecl
+          | EnumDecl
+          | InterfaceDecl
+          | OperatorDecl
+          | FunctionDecl
+          | PropertyDecl
+          | vd:VariableDecl Terminator+ { nq_onStatement(core->this, vd) }
+          )
+
+GenericArguments =
+            (
+            - LESSTHAN
+            - name:IDENT         { nq_onGenericArgument(core->this, name) }
+            (
+            - ','
+            - name:IDENT         { nq_onGenericArgument(core->this, name) }
+            )*
+            MORETHAN -
+            )
+
+TemplateDef = (
+            WS "template" WS
+
+            { nq_onTemplateStart(core->this) }
+
+            GenericArguments
+
+            { nq_onTemplateEnd(core->this) }
+)
+
+OperatorDecl =
+            (
+                (OPERATOR_KW { tokenPos; nq_onOperatorStart(core->this) })
+                | (ABSTRACT_KW - OPERATOR_KW { tokenPos; nq_onOperatorStart(core->this); nq_onOperatorAbstract(core->this) })
+            ) -
+            ("@" { nq_onOperatorByref(core->this) })?
+            - < ( "=>" | "<=>"| ">>="| "<<="| ">>" | "<<"
+                | ">=" | "<=" | "!=" | "==" | ">" | "<" | "!" | "??"
+                | "+=" | "-=" | "*=" | "**="| "/=" | "+" | "-" | "**" | "/" | "*" | "="
+                | "[]="| "[]" | "&&" | "||" | "%" | "as" | "implicit as"
+                | "&=" | "|=" | "^=" | "&"  | "|" | "^" | "~"
+                ) >
+            { nq_onOperatorSymbol(core->this, yytext); nq_onOperatorBodyStart(core->this) } -
+            FunctionDeclBody
+            { nq_onOperatorEnd(core->this) }
+
+FunctionDecl = SuperFunctionDecl | RegularFunctionDecl
+
+SuperFunctionDecl = name:IDENT - COLON - 'super' - FUNC_KW -
+            { tokenPos; nq_onFunctionStart(core->this, name, ""); nq_onFunctionSuper(core->this) }
+            # optional suffix
+            (
+            - '~' suffix:IDENT { nq_onFunctionSuffix(core->this, suffix) }
+            )?
+            { $$=nq_onFunctionEnd(core->this) }
+
+RegularFunctionDecl =
+            doc: OocDoc
+
+            name:IDENT { tokenPos; nq_onFunctionStart(core->this, name, doc) }
+            - COLON
+
+            # modifiers
+            (-  ( externName:ExternName  { nq_onFunctionExtern(core->this, externName) }
+                | unmangledName:UnmangledName { nq_onFunctionUnmangled(core->this, unmangledName) }
+                | ABSTRACT_KW { nq_onFunctionAbstract(core->this) }
+                | STATIC_KW   { nq_onFunctionStatic(core->this) }
+                | INLINE_KW   { nq_onFunctionInline(core->this) }
+                | FINAL_KW    { nq_onFunctionFinal(core->this) }
+                | PROTO_KW    { nq_onFunctionProto(core->this) }
+		| VIRTUAL_KW  { nq_onFunctionVirtual(core->this) }
+		| OVERRIDE_KW { nq_onFunctionOverride(core->this) }
+                )
+            )*
+
+            FunctionDeclCore
+
+AnonymousFunctionDecl = { nq_onFunctionStart(core->this, "", "") } FunctionDeclCore
+
+FunctionDeclCore =
+            - FUNC_KW
+            ('@' { nq_onFunctionThisRef(core->this) })?
+
+            # optional suffix
+            (
+            - '~' suffix:IDENT { nq_onFunctionSuffix(core->this, suffix) }
+            )?
+
+            FunctionDeclBody
+
+
+FunctionDeclBody = (
+            GenericArguments?
+
+            # arguments are optional
+            (
+                WS '(' { nq_onFunctionArgsStart(core->this) }
+                (          WS Argument WS
+                    (',' WS Argument WS)*
+                )?
+                WS CLOS_PAREN ~{ throwError(NQE_EXP_ARG, "Malformed function argument (remember, it's `name: Type` in ooc, not `Type name`)\n") }
+                              { nq_onFunctionArgsEnd(core->this) }
+            )?
+
+            # optional suffix
+            (
+            - '~' suffix:IDENT { throwTokenError(NQE_MISPLACED_SUFFIX, "Misplaced function suffix (remember, it's `name: func ~suffix (args)`, not `name: func (args) ~suffix`") }
+            )?
+
+            # return type is optional
+            (
+                - R_ARROW
+                - t:Type ~{ throwError(NQE_EXP_RET_TYPE, "Missing return type.\n") }
+                          { nq_onFunctionReturnType(core->this, t) }
+            )?
+
+            # body is optional (for abstract/extern-named functions)
+            (
+                { nq_onFunctionBody(core->this); }
+                WS '{' WS
+                (WS
+                (s:Stmt  { nq_onStatement(core->this, s) })
+                WS)*
+                WS CLOS_BRACK ~{ rewindWhiteSpace; throwError(NQE_EXP_STATEMENT_OR_CLOSING_BRACKET, "Malformed statement or closing bracket missing\n") }
+            )?
+            ) { $$=nq_onFunctionEnd(core->this); }
+
+Argument    = ( (DOT dotName:IDENT -)    { tokenPos; nq_onDotArg(core->this, dotName) }
+              | (ASS assName:IDENT -)    { tokenPos; nq_onAssArg(core->this, assName) }
+              | vd:VariableDecl          { tokenPos; nq_onStatement(core->this, vd) }
+              | (vargName:IDENT - ":" - "..." -) { tokenPos; nq_onVarArg(core->this, vargName) } # ooc varargs
+              | type:Type                { tokenPos; nq_onTypeArg(core->this, type) }
+              | "..."                    { tokenPos; nq_onVarArg(core->this, NULL) } # C varargs
+              )
+
+
+ClassDecl   = (
+            doc: OocDoc
+
+            className:IDENT { tokenPos; nq_onClassStart(core->this, className, doc) }
+            - COLON
+
+            # modifiers
+            (-  ( ExternName
+                | ABSTRACT_KW { nq_onClassAbstract(core->this) }
+                | FINAL_KW    { nq_onClassFinal(core->this) }
+                )
+            )*
+
+            - CLASS_KW
+
+            GenericArguments?
+
+            # subclassing
+            (
+            - EXTENDS_KW - t:Type { nq_onClassExtends(core->this, t) }
+            )?
+
+            # interface subclassing
+            (
+            - IMPLEMENTS_KW
+                     - t:Type { nq_onClassImplements(core->this, t) }
+            (- ',' - t:Type { nq_onClassImplements(core->this, t) })*
+            )?
+
+            { nq_onClassBody(core->this); }
+
+            (
+                WS '{' WS
+
+                # classdecl contents
+                (WS
+                    ( vd:VariableDecl { tokenPos; nq_onStatement(core->this, vd); } Terminator+
+                    | pd:PropertyDecl { tokenPos; nq_onStatement(core->this, pd); }
+                    | fd:FunctionDecl
+                    | od:OperatorDecl
+                    | stmt:Stmt { tokenPos; nq_onStatement(core->this, stmt); }
+                    )
+                WS)*
+
+                WS
+                CLOS_BRACK ~{ throwError(NQE_EXP_VAR_OR_FUNC_DECL, "Expected member, method, or '"_CSBRACK"' to close class.\n"); }
+            )
+            ) { nq_onClassEnd(core->this) }
+
+EnumDecl    = (
+            doc: OocDoc
+
+            enumName:IDENT { tokenPos; nq_onEnumStart(core->this, enumName, doc); }
+            - COLON
+
+            # modifiers (extern)
+            (- externName:ExternName { nq_onEnumExtern(core->this, externName); })?
+
+            - ENUM_KW
+
+            # optional from-type
+            (- FROM_KW - fromType:Type { tokenPos; nq_onEnumFromType(core->this, fromType); })?
+
+            # increment expression (ex: *2 or +1)
+            (
+            - '('
+            - op:EnumIncrementOper WS step:IntLiteral { nq_onEnumIncrementExpr(core->this, ((char*)op)[0], step); }
+            - ')'
+            )?
+
+            (
+                WS '{' WS
+
+                # enumeration elements
+                (EnumElement
+                (
+                    (Terminator+ WS FunctionDecl) |
+                    ((',' | Terminator+) WS EnumElement)
+                )*
+                )?
+
+                WS
+                CLOS_BRACK ~{ throwError(NQE_EXP_ENUM_ELEMENT, "Expected enum element!\n"); }
+            )
+
+            ) { tokenPos; nq_onEnumEnd(core->this) }
+
+EnumElement = (
+                doc: OocDoc
+
+                i:IDENT { tokenPos; nq_onEnumElementStart(core->this, i, doc); }
+                - ( ASS value:Expr { nq_onEnumElementValue(core->this, value); }
+                  | COLON
+                    - externName:ExternName { nq_onEnumElementExtern(core->this, externName); }
+                  )?
+            ) { nq_onEnumElementEnd(core->this) }
+
+EnumIncrementOper =  ( STAR { $$="*"; }
+                     | PLUS { $$="+"; }
+                     )
+
+ExtendDecl  = (
+            doc: OocDoc
+
+            "extend" WS
+            extendedType: Type { tokenPos; nq_onExtendStart(core->this, extendedType, doc); }
+
+            # body
+            (
+                WS '{' WS
+
+                # coverdecl content
+                (WS
+                    ( fd:FunctionDecl
+                    | pd:PropertyDecl { tokenPos; nq_onStatement(core->this, pd); }
+                    )
+                WS)*
+
+                WS
+                CLOS_BRACK ~{ throwError(NQE_EXP_VAR_OR_FUNC_DECL, "Expected or function declaration\n"); }
+            )
+
+            { nq_onExtendEnd(core->this); }
+            )
+
+CoverDecl   = (
+            doc: OocDoc
+
+            coverName:IDENT { tokenPos; nq_onCoverStart(core->this, coverName, doc); }
+            - COLON
+
+            # modifiers
+            (- externName:ExternName { nq_onCoverExtern(core->this, externName); })?
+
+            (- PROTO_KW { nq_onCoverProto(core->this); })?
+
+            - COVER_KW
+
+            GenericArguments?
+
+            TemplateDef?
+
+            # covering another type
+            (
+            - FROM_KW - t:Type { nq_onCoverFromType(core->this, t) }
+            )?
+
+            # extending another type
+            (
+            - EXTENDS_KW - t:Type { nq_onCoverExtends(core->this, t) }
+            )?
+
+            # interface subclassing
+            (
+            - IMPLEMENTS_KW
+                     - t:Type { nq_onCoverImplements(core->this, t) }
+            (- ',' - t:Type { nq_onCoverImplements(core->this, t) })*
+            )?
+
+            # body is optional for covers
+            (
+                WS '{' WS
+
+                # coverdecl content
+                (WS
+                    ( vd:VariableDecl { tokenPos; nq_onStatement(core->this, vd); } Terminator+
+                    | pd:PropertyDecl { tokenPos; nq_onStatement(core->this, pd); }
+                    | od:OperatorDecl
+                    | fd:FunctionDecl
+                    )
+                WS)*
+
+                WS
+                CLOS_BRACK  ~{ throwError(NQE_EXP_VAR_OR_FUNC_DECL, "Expected variable declaration or function declaration\n"); }
+            )?
+            )
+            { nq_onCoverEnd(core->this); }
+
+InterfaceDecl = (
+            doc: OocDoc
+
+            interfaceName:IDENT { tokenPos; nq_onInterfaceStart(core->this, interfaceName, doc); }
+            - COLON
+
+            - INTERFACE_KW
+
+            GenericArguments?
+
+            # extending another interface
+            (
+            - EXTENDS_KW - t:Type { nq_onInterfaceExtends(core->this, t) }
+            )?
+
+            # interface subclassing
+            (
+            - IMPLEMENTS_KW
+                     - t:Type { nq_onClassImplements(core->this, t) }
+            (- ',' - t:Type { nq_onClassImplements(core->this, t) })*
+            )?
+
+            # body is required for interfaces
+            (
+                WS '{' WS
+
+                # interface content
+                (WS
+                    fd:FunctionDecl
+                WS)*
+
+                WS
+                CLOS_BRACK  ~{ throwError(NQE_EXP_VAR_OR_FUNC_DECL, "Expected method or '"_CSBRACK"' to close interface.\n"); }
+            )
+            )
+            { nq_onInterfaceEnd(core->this); }
+
+ExternName = EXTERN_KW { $$="" }
+              (
+              - '('
+              - < [A-Za-z_] [A-Za-z0-9_]* > { $$=yytext } # is that correct? should it be $$=$$? what's happening?
+              - ')'
+              )?
+
+UnmangledName = UNMANGLED_KW { $$="" }
+             (
+             - '('
+             - unmangledName:IDENT { $$=unmangledName }
+             - ')'
+             )?
+
+VarDeclFromExpr = ( doc: OocDoc
+
+                    ( i:IDENT   { tokenPos; nq_onVarDeclStart(core->this); nq_onVarDeclName (core->this, i,   doc); }
+                    | tup:Tuple { nq_onVarDeclStart(core->this); nq_onVarDeclTuple(core->this, tup); })
+                  - ASS_DECL
+                  (-
+                    (
+                        STATIC_KW { nq_onVarDeclStatic(core->this); }
+                      | CONST_KW  { nq_onVarDeclConst (core->this); }
+                      | PROTO_KW  { nq_onVarDeclProto (core->this); }
+                      | FORCEDMALLOC_KW {nq_onVarDeclForcedMalloc(core->this);}
+                    ) &[^A-Za-z_0-9]
+                  )*
+                  - r:Expr { nq_onVarDeclExpr(core->this, r); }
+                  - { $$=nq_onVarDeclEnd(core->this); }
+                  )
+
+ConventionalVarDecl =
+            { nq_onVarDeclStart(core->this); }
+
+            (
+            doc: OocDoc
+            varDeclName:IDENT { tokenPos; nq_onVarDeclName(core->this, varDeclName, doc); }
+            (- ASS - Expr { nq_onVarDeclExpr(core->this, $$); })?
+
+            # multi-decls
+            (
+            - ','
+            doc: OocDoc
+            WS nextDeclName:IDENT { nq_onVarDeclName(core->this, nextDeclName, doc); }
+            (- ASS - Expr { nq_onVarDeclExpr(core->this, $$); })?
+            -
+            )*
+
+            WS COLON WS
+            (-
+              (
+                  STATIC_KW { nq_onVarDeclStatic(core->this); }
+                | CONST_KW  { nq_onVarDeclConst (core->this); }
+                | PROTO_KW  { nq_onVarDeclProto (core->this); }
+                | externName:ExternName { nq_onVarDeclExtern(core->this, externName); }
+                | unmangledName:UnmangledName { nq_onVarDeclUnmangled(core->this, unmangledName); }
+                | FORCEDMALLOC_KW {nq_onVarDeclForcedMalloc(core->this);}
+              )
+            )*
+            WS Type { nq_onVarDeclType(core->this, $$); }
+            (- ASS - Expr { nq_onVarDeclExpr(core->this, $$); })?
+            )  { $$=nq_onVarDeclEnd(core->this); }
+
+VariableDecl = (v:VarDeclFromExpr     { $$=v })
+             | (v:ConventionalVarDecl { $$=v })
+
+PropertyDecl = (p:PropertyDeclFromExpr     { $$=p })
+             | (p:ConventionalPropertyDecl { $$=p })
+
+ConventionalPropertyDecl =
+           (
+           doc: OocDoc
+           propertyName:IDENT { tokenPos; nq_onPropertyDeclStart(core->this, propertyName, doc); }
+
+           WS COLON WS
+
+           (STATIC_KW { nq_onPropertyDeclStatic(core->this); })?
+           WS
+
+           Type { nq_onPropertyDeclType(core->this, $$); }
+
+           WS '{' WS
+           PropertyDeclCore
+           WS CLOS_BRACK ~{ rewindWhiteSpace; throwError(NQE_EXP_CLOSING_BRACK, "Expected '"_CSBRACK"' to close property decl!\n"); }
+           WS
+
+           ) { $$=nq_onPropertyDeclEnd(core->this); }
+
+PropertyDeclFromExpr = ( doc: OocDoc
+            propertyName:IDENT   { tokenPos; nq_onPropertyDeclStart(core->this, propertyName, doc); }
+            - PROPASS_DECL
+            (-
+            (
+                STATIC_KW { nq_onPropertyDeclStatic(core->this); }
+            ) &[^A-Za-z_0-9]
+            )*
+            - expr:Expr { nq_onPropertyDeclGetterStart(core->this, NULL); nq_onStatement(core->this, expr); nq_onPropertyDeclGetterEnd(core->this); }
+            - { $$=nq_onPropertyDeclEnd(core->this); }
+            )
+
+PropertyDeclCore =
+           (
+               PropertyDeclGetter
+             | PropertyDeclSetter
+           )*
+
+PropertyDeclGetter =
+           doc: OocDoc
+
+           { nq_onPropertyDeclGetterStart(core->this, doc); }
+           WS GET_KW WS
+           (
+             COLON
+             WS
+             externName:ExternName { nq_onFunctionExtern(core->this, externName); }
+           )?
+           ('{'
+                (WS
+                (s:Stmt  { nq_onStatement(core->this, s) })
+                WS)*
+           CLOS_BRACK ~{ rewindWhiteSpace; throwError(NQE_EXP_CLOSING_BRACK, "Expected '"_CSBRACK"' to close property getter\n"); }
+           )?
+           { $$=nq_onPropertyDeclGetterEnd(core->this); }
+
+PropertyDeclSetter =
+           doc: OocDoc
+
+           { nq_onPropertyDeclSetterStart(core->this, doc); }
+           WS SET_KW WS
+           (
+             COLON
+             WS
+             externName:ExternName { nq_onFunctionExtern(core->this, externName); }
+           )?
+           ('(' WS
+                (
+                      (argName:IDENT       { nq_onPropertyDeclSetterArgument(core->this, argName, 1); })
+                    | (ASS assName:IDENT - { nq_onPropertyDeclSetterArgument(core->this, assName, 0); })
+                )
+           CLOS_PAREN ~{ rewindWhiteSpace; throwError(NQE_EXP_CLOSING_PAREN, "Expected ')' to close property setter argument list.\n"); }
+           WS
+           '{'
+                (WS
+                (s:Stmt  { nq_onStatement(core->this, s) })
+                WS)*
+           CLOS_BRACK ~{ rewindWhiteSpace; throwError(NQE_EXP_CLOSING_BRACK, "Expected '??<' to close property setter body.\n"); }
+           )?
+           { $$=nq_onPropertyDeclSetterEnd(core->this); }
+
+TypeBase = FuncType |
+          (< { tokenPos; core->typeBuffer[0]='\0'; } (CONST_KW -)?
+            (
+                ( "unsigned"                                  { strcat(core->typeBuffer, "unsigned "); } -
+                | "signed"                                    { strcat(core->typeBuffer, "signed "); } -
+                | "long" &(- ("long" | "double" | "int"))     { strcat(core->typeBuffer, "long "); } -
+                | "struct"			                          { strcat(core->typeBuffer, "struct "); } -
+                | "union"			                          { strcat(core->typeBuffer, "union "); } -
+                )
+            - )*
+            rest:IDENT { strcat(core->typeBuffer, rest); }
+          > { $$=nq_onTypeNew(core->this, core->typeBuffer); })
+
+# a GenericType is just like a Type but with non-optional generic type arguments
+# it's used when we have to decide between a Type and a VariableAccess
+GenericType
+        = (
+           temp: Old # When entering the TypeBase rule, i gets overwritten, so we just use a dummy rule to store it
+           - i:IDENT { temp=nq_StringClone(i); }
+           - t:TypeBase !FuncType { nq_onTypeNamespace(core->this, t, temp); }
+           - '<' - t2:Type { nq_onTypeGenericArgument(core->this, t, t2); }
+          (- ','    - t2:Type { nq_onTypeGenericArgument(core->this, t, t2); })*
+           - '>'
+           - ('*' { t=$$=nq_onTypePointer  (core->this, t); }
+          |   '@' { t=$$=nq_onTypeReference(core->this, t); }
+          | "[" WS { inner=NULL; } - inner:Expr? "]" { t=$$=nq_onTypeBrackets(core->this, t, inner); }
+          )*
+          - { $$=t; }
+          ) |
+          (t:TypeBase
+           - '<' - t2:Type { nq_onTypeGenericArgument(core->this, t, t2); }
+          (- ','    - t2:Type { nq_onTypeGenericArgument(core->this, t, t2); })*
+           - '>'
+           - ('*' { t=$$=nq_onTypePointer  (core->this, t); }
+          |   '@' { t=$$=nq_onTypeReference(core->this, t); }
+          | "[" WS { inner=NULL; } - inner:Expr? "]" { t=$$=nq_onTypeBrackets(core->this, t, inner); }
+          )*
+          - { $$=t; })
+
+Type    = list:TypeList { $$=list; } | (
+          t:TypeBase
+          (- '<' - genType:Type { nq_onTypeGenericArgument(core->this, t, genType); }
+          (- ','    - genType:Type { nq_onTypeGenericArgument(core->this, t, genType); })*
+           - '>')?
+          - (STAR { t=$$=nq_onTypePointer  (core->this, t); }
+          |  '@'   { t=$$=nq_onTypeReference(core->this, t); }
+          | "[" WS { inner=NULL; } - inner:Expr? "]" { t=$$=nq_onTypeBrackets(core->this, t, inner); }
+          )*
+          - { $$=t; }) |
+          ('('
+           temp: Old # When entering the TypeBase rule, i gets overwritten, so we just use a dummy rule to store it
+           - i:IDENT { temp=nq_StringClone(i); }
+           - t:TypeBase !FuncType { nq_onTypeNamespace(core->this, t, temp); }
+           (- '<' - genType:Type { nq_onTypeGenericArgument(core->this, t, genType); }
+          (- ','    - genType:Type { nq_onTypeGenericArgument(core->this, t, genType); })*
+           - '>')?
+          - (STAR { t=$$=nq_onTypePointer  (core->this, t); }
+          |  '@'   { t=$$=nq_onTypeReference(core->this, t); }
+          | "[" WS { inner=NULL; } - inner:Expr? "]" { t=$$=nq_onTypeBrackets(core->this, t, inner); }
+          )*
+          - { $$=t; }
+           ')'
+          )
+
+
+TypeListCore = { $$=nq_onTypeList(core->this); }
+TypeList = '(' WS list:TypeListCore
+                      elem:Type { nq_onTypeListElement(core->this, list, elem) }
+           (WS ',' WS elem:Type { nq_onTypeListElement(core->this, list, elem) })*
+           ')' -
+           { $$=list; }
+
+FuncTypeCore = "Func" &[^A-Za-z0-9_] { tokenPos; $$=nq_onFuncTypeNew(core->this); }
+
+FuncType  = funcType:FuncTypeCore
+            (- '<' - genType:IDENT { nq_onFuncTypeGenericArgument(core->this, funcType, genType); }
+            (- ',' - genType:IDENT { nq_onFuncTypeGenericArgument(core->this, funcType, genType); })*
+            - '>')?
+            (
+            - '('
+            (    - argType:Type { nq_onFuncTypeArgument(core->this, funcType, argType); }
+            (',' - argType:Type { nq_onFuncTypeArgument(core->this, funcType, argType); })*
+            )?
+            ("..." - { nq_onFuncTypeVarArg(core->this, funcType); })?
+            - ')'
+            )?
+            (- '->'
+             - returnType:Type { nq_onFuncTypeReturnType(core->this, funcType, returnType); }
+            )?
+            { $$=funcType; }
+
+# oh that's on naughty workaround. it's a dummy rule that's always
+# matched just to provide a variable in the context of 'Stmt' with different
+# version blocks.
+Old = { $$=NULL }
+
+Stmt     = (
+                old:Old
+                WS 'version' { tokenPos; }
+                WS '('
+                - spec:VersionSpec
+                WS ')'
+                ((
+                - '{' { nq_onVersionStart(core->this, spec); }
+                WS (s:Stmt { nq_onStatement(core->this, s); })* WS
+                - CLOS_BRACK ~{ rewindWhiteSpace; throwError(NQE_EXP_STATEMENT_OR_CLOSING_BRACKET, "Malformed statement or '"_CSBRACK"' missing to close version block.\n") }
+                ) { old=$$=nq_onVersionEnd(core->this); }
+                |
+                (
+                - s:Stmt { nq_onVersionStart(core->this, spec); nq_onStatement(core->this, s); old=$$=nq_onVersionEnd(core->this); }
+                ))
+                (
+                  WS 'else' - 'version' { tokenPos }
+                  WS '('
+                  - elseSpec: VersionSpec
+                  WS ')'
+                  ((
+                  - '{' { spec = nq_onVersionElseIfStart(core->this, spec, elseSpec) }
+                  WS (s:Stmt { nq_onStatement(core->this, s); })* WS
+                  - CLOS_BRACK ~{ rewindWhiteSpace; throwError(NQE_EXP_STATEMENT_OR_CLOSING_BRACKET, "Malformed statement or '"_CSBRACK"' missing to close version block.\n") }
+                  ) { $$=nq_onVersionEnd(core->this); nq_onStatement(core->this, old); old=$$ }
+                  |
+                  (
+                  - s:Stmt { spec = nq_onVersionElseIfStart(core->this, spec, elseSpec); nq_onStatement(core->this, s); $$=nq_onVersionEnd(core->this); nq_onStatement(core->this, old); old=$$ }
+                  ))
+                )*
+                (
+                  WS 'else' { tokenPos }
+                  ((
+                  - '{' { nq_onVersionElseStart(core->this, spec) }
+                  WS (s:Stmt { nq_onStatement(core->this, s); })* WS
+                  - CLOS_BRACK ~{ rewindWhiteSpace; throwError(NQE_EXP_STATEMENT_OR_CLOSING_BRACKET, "Malformed statement or '"_CSBRACK"' missing to close version block\n") }
+                  ) { $$=nq_onVersionEnd(core->this); nq_onStatement(core->this, old); old=$$ }
+                  |
+                  (
+                  - s:Stmt { nq_onVersionElseStart(core->this, spec); nq_onStatement(core->this, s); $$=nq_onVersionEnd(core->this); nq_onStatement(core->this, old); old=$$ }
+                  ))
+                )?
+            )
+         | StmtCore
+
+StmtCore = (
+              # some statements need an EOL after them...
+              e:EoledStatement
+              (Terminator+ | (WS &'}') | (WS &')') | (WS &',') | (&CommentLine))
+           )
+          | # ...but blocks don't
+          ( WS c:Conditional
+          | WS b:Block
+          | WS f:FlowControl (Terminator*)
+          | WS m:Match
+          | WS t:Try
+          )
+
+EoledStatement =  ( WS Return
+                  | WS VariableDecl
+                  | WS Expr
+                  )
+
+Conditional = (If | Else)
+
+Block   = (
+           '{' { tokenPos; nq_onBlockStart(core->this); }
+          (WS s:Stmt { tokenPos; nq_onStatement(core->this, s) } WS)*
+           WS CLOS_BRACK ~{ rewindWhiteSpace; throwError(NQE_EXP_CLOSING_BRACK, "Expected statement or '"_CSBRACK"' to close block."); } { $$=nq_onBlockEnd(core->this); }
+          )
+
+If      = (
+          IF_KW { tokenPos; }
+          WS '(' WS
+          - e:Expr       { nq_onIfStart(core->this, e); }
+          WS CLOS_PAREN ~{ rewindWhiteSpace; throwError(NQE_EXP_CLOSING_PAREN, "Expected if condition or ')'.") }
+          - Body
+          )              { $$=nq_onIfEnd(core->this); }
+
+Else    = (
+          ELSE_KW  { tokenPos; }
+                         { nq_onElseStart(core->this); }
+          - Body
+          )              { $$=nq_onElseEnd(core->this); }
+
+Case    = CASE_KW  { tokenPos; nq_onCaseStart(core->this); }
+        (- v:CaseExpr { nq_onCaseExpr(core->this, v); })?
+        WS DOUBLE_ARROW ~{ throwError(NQE_EXP_DOUBLE_ARROW, "Expected double arrow after case expression!\n"); }
+         (WS
+          (s:Stmt  { nq_onStatement(core->this, s) })
+          WS)*
+          WS
+          { nq_onCaseEnd(core->this); }
+
+Match   = MATCH_KW { tokenPos; nq_onMatchStart(core->this); }
+            (- v: Value { nq_onMatchExpr(core->this, v); })?
+          WS '{'
+          (WS Case WS)*
+          WS CLOS_BRACK ~{ throwError(NQE_EXP_CASE_IN_MATCH, "Expected case or '"_CSBRACK"' to close match block.") }
+          { $$=nq_onMatchEnd(core->this); }
+
+Try     = TRY_KW { tokenPos; nq_onTryStart(core->this); }
+          - Body
+          (WS Catch WS)*
+          { $$=nq_onTryEnd(core->this); }
+
+Catch   = CATCH_KW { tokenPos; nq_onCatchStart(core->this); }
+          (- v:Expr { nq_onCatchExpr(core->this, v); })?
+          WS '{'
+          (WS s:Stmt WS { nq_onStatement(core->this, s); })*
+          WS CLOS_BRACK ~{ throwError(NQE_EXP_CLOSING_BRACK, "Expected statement or '"_CSBRACK"' to close catch block."); }
+          { nq_onCatchEnd(core->this); }
+
+FlowControl = (Foreach | While | Break | Continue)
+
+Break    = BREAK_KW    { tokenPos; $$=nq_onBreak(core->this); }
+Continue = CONTINUE_KW { tokenPos; $$=nq_onContinue(core->this); }
+
+ImplicitDecl = (v:VariableDecl { $$=v })
+             | (t: Tuple { $$=t })
+             | (i:IDENT        { $$=nq_onVarAccess(core->this, NULL, i); })
+
+Foreach = FOR_KW { tokenPos; }
+          WS '(' WS
+          - decl:ImplicitDecl
+          - IN_KW
+          - collec:Expr
+          WS CLOS_PAREN ~{ rewindWhiteSpace; throwError(NQE_EXP_CLOSING_PAREN, "Malformed foreach, expected ')' to close condition!\n") } { nq_onForeachStart(core->this, decl, collec); }
+          - Body
+          -            { $$=nq_onForeachEnd(core->this); }
+
+While = WHILE_KW { tokenPos; }
+        WS '(' WS
+        - condition:Expr
+        WS CLOS_PAREN ~{ rewindWhiteSpace; throwError(NQE_EXP_CLOSING_PAREN, "Malformed while! Expected ')' to close condition.\n"); } { nq_onWhileStart(core->this, condition); }
+        - Body
+        -            { $$=nq_onWhileEnd(core->this); }
+
+Body =  (
+        '{'
+        (WS s:Stmt { tokenPos; nq_onStatement(core->this, s) } WS)*
+        WS CLOS_BRACK ~{ throwError(NQE_EXP_STATEMENT_OR_CLOSING_BRACKET, "Expected statement or '"_CSBRACK"' to close body.!\n") }
+        ) | s:Stmt { tokenPos; nq_onStatement(core->this, s) }
+
+Return  = (RETURN_KW &([^A-Za-z_]) { tokenPos; } - e:Expr { $$=nq_onReturn(core->this, e); })
+        | (RETURN_KW &([^A-Za-z_]) { tokenPos; } -        { $$=nq_onReturn(core->this, NULL); })
+
+
+Expr     =   v:VariableDecl -
+           | d:DoubleArrow -
+           | b:BinaryOperation - (- '.' { tokenPos; } WS call:FunctionCall { $$=b=nq_onFunctionCallChain(core->this, b, call); })*
+           | AnonymousFunctionDecl
+
+CaseExpr = ( v:VariableDecl -
+           | b:BinaryOperation - (- '.' { tokenPos; } WS call:FunctionCall { $$=b=nq_onFunctionCallChain(core->this, b, call); })*
+           | AnonymousFunctionDecl
+           )
+           |
+           ( '('  -
+             Expr -
+             ')'
+           )
+
+DoubleArrow = l:Assignment
+              DOUBLE_ARROW { tokenPos; } WS r:Expr        ~{  missingOp("=>") } { $$=l=nq_onDoubleArrow(core->this, l, r); }
+
+#operators
+
+BinaryOperation = Assignment
+
+Assignment = l: Ternary
+                ( ASS            { tokenPos; }  WS   r: Ternary               { $$=l=nq_onAssign(core->this, l, r); }
+                # The following line is actually the only case where AnonymousFunctionDecl makes sense at this level of precedence.
+                | ASS            { tokenPos; }  WS   r: AnonymousFunctionDecl ~{  missingOp("=") }   { $$=l=nq_onAssign(core->this, l, r); }
+                | ASS_ADD        { tokenPos; }  WS   r: Ternary               ~{  missingOp("+=") }  { $$=l=nq_onAssignAdd(core->this, l, r); }
+                | ASS_SUB        { tokenPos; }  WS   r: Ternary               ~{  missingOp("-=") }  { $$=l=nq_onAssignSub(core->this, l, r); }
+                | ASS_MUL        { tokenPos; }  WS   r: Ternary               ~{  missingOp("*=") }  { $$=l=nq_onAssignMul(core->this, l, r); }
+                | ASS_EXP        { tokenPos; }  WS   r: Ternary               ~{  missingOp("**=") }  { $$=l=nq_onAssignExp(core->this, l, r); }
+                | ASS_DIV        { tokenPos; }  WS   r: Ternary               ~{  missingOp("/=") }  { $$=l=nq_onAssignDiv(core->this, l, r); }
+                | ASS_B_LSHIFT   { tokenPos; }  WS   r: Ternary               ~{  missingOp("<<=") } { $$=l=nq_onAssignLeftShift(core->this, l, r); }
+                | ASS_B_RSHIFT   { tokenPos; }  WS   r: Ternary               ~{  missingOp(">>=") } { $$=l=nq_onAssignRightShift(core->this, l, r); }
+                | ASS_B_XOR      { tokenPos; }  WS   r: Ternary               ~{  missingOp("^=") }  { $$=l=nq_onAssignXor(core->this, l, r); }
+                | ASS_B_OR       { tokenPos; }  WS   r: Ternary               ~{  missingOp("|=") }  { $$=l=nq_onAssignOr(core->this, l, r); }
+                | ASS_B_AND      { tokenPos; }  WS   r: Ternary               ~{  missingOp("&=") }  { $$=l=nq_onAssignAnd(core->this, l, r); }
+                )*
+
+Ternary =   cond:NullCoalescing
+            (
+          - QUEST { tokenPos; }
+          WS ifTrue:NullCoalescing ~{ throwError(NQE_MALFORMED_TERNARY, "Expected expression between ? and : in ternary expression!\n") }
+          - COLON
+          WS ifFalse:NullCoalescing
+            { $$=nq_onTernary(core->this, cond, ifTrue, ifFalse); }
+            )?
+
+NullCoalescing = l: LogicalOr
+                     ( DOUBLE_QUEST { tokenPos; } WS r: NullCoalescing     ~{  missingOp("??") } { $$=l=nq_onNullCoalescing(core->this, l, r); }
+                     )?
+
+LogicalOr = l:LogicalAnd
+                ( L_OR        { tokenPos; } WS  r: LogicalAnd         ~{  missingOp("||") } { $$=l=nq_onLogicalOr(core->this, l, r); }
+                )*
+
+LogicalAnd = l:BinaryOr
+                ( L_AND       { tokenPos; } WS  r: BinaryOr           ~{  missingOp("&&") } { $$=l=nq_onLogicalAnd(core->this, l, r); }
+                )*
+
+BinaryOr = l:BinaryXor
+                ( B_OR        { tokenPos; } WS  r: BinaryXor           ~{  missingOp("|") } { $$=l=nq_onBinaryOr(core->this, l, r); }
+                )*
+
+BinaryXor = l:BinaryAnd
+                ( B_XOR       { tokenPos; } WS  r: BinaryAnd           ~{  missingOp("^") } { $$=l=nq_onBinaryXor(core->this, l, r); }
+                )*
+
+BinaryAnd = l:Equality
+                ( B_AND       { tokenPos; } WS  r: Equality            ~{  missingOp("&") } { $$=l=nq_onBinaryAnd(core->this, l, r); }
+                )*
+
+Equality = l:Inequality
+                ( EQUALS      { tokenPos; } WS  r:Inequality          ~{  missingOp("==") } { $$=l=nq_onEquals(core->this, l, r); }
+                | NOT_EQUALS  { tokenPos; } WS  r:Inequality          ~{  missingOp("!=") } { $$=l=nq_onNotEquals(core->this, l, r); }
+                )*
+
+Inequality = l:Range
+                ( LESSTHAN    { tokenPos; } WS  r:Range                ~{  missingOp("<") } { $$=l=nq_onLessThan(core->this, l, r); }
+                | MORETHAN    { tokenPos; } WS  r:Range                ~{  missingOp(">") } { $$=l=nq_onMoreThan(core->this, l, r); }
+                | CMP         { tokenPos; } WS  r:Range              ~{  missingOp("<=>") } { $$=l=nq_onCmp(core->this, l, r); }
+                | LESSTHAN_EQ { tokenPos; } WS  r:Range               ~{  missingOp("<=") } { $$=l=nq_onLessThanOrEqual(core->this, l, r); }
+                | MORETHAN_EQ { tokenPos; } WS  r:Range               ~{  missingOp(">=") } { $$=l=nq_onMoreThanOrEqual(core->this, l, r); }
+                )*
+
+Range   = l:Shift
+                ( DOUBLE_DOT  { tokenPos; } WS  r:Shift               ~{  missingOp("..") } { $$=l=nq_onRangeLiteral(core->this, l, r); }
+                )*
+
+Shift   = l:Sum
+                ( B_LSHIFT    { tokenPos; } WS  r:Sum                 ~{  missingOp("<<") } { $$=l=nq_onBinaryLeftShift(core->this, l, r) }
+                | B_RSHIFT    { tokenPos; } WS  r:Sum                 ~{  missingOp(">>") } { $$=l=nq_onBinaryRightShift(core->this, l, r) }
+                )*
+
+Sum     = l:Product
+                ( PLUS        { tokenPos; } WS  r:Product              ~{  missingOp("+") } { $$=l=nq_onAdd(core->this, l, r); }
+                | MINUS       { tokenPos; } WS  r:Product              ~{  missingOp("-") } { $$=l=nq_onSub(core->this, l, r); }
+                | PERCENT     { tokenPos; } WS  r:Product              ~{  missingOp("%") } { $$=l=nq_onMod(core->this, l, r); }
+                )*
+
+Product = (ProductLogicalNot | ProductBinaryNot | ProductCore)
+
+ProductLogicalNot = L_NOT { tokenPos; } - (inner:Product) - { $$=inner=nq_onLogicalNot(core->this, inner); }
+ProductBinaryNot  = B_NOT { tokenPos; } - (inner:Product) - { $$=inner=nq_onBinaryNot (core->this, inner); }
+
+ProductCore = l:Access
+                    ( EXP         { tokenPos; }  WS r:Product             { $$=l=nq_onExp(core->this, l, r); }
+                    | STAR        { tokenPos; }  WS r:Access              { $$=l=nq_onMul(core->this, l, r); }
+                    | SLASH       { tokenPos; }  WS r:Access              { $$=l=nq_onDiv(core->this, l, r); }
+                    )*
+
+Access =  ((ident:IDENT_CORE { tokenPos; } '&' ![&=] - { core->token[1] += 1; $$=l=nq_onAddressOf(core->this, nq_onVarAccess(core->this, NULL, ident)); }) # special case: blah& is always a reference. blah & blih is a binary and.
+          | l:Value)
+                ((
+                    - '[' - { tokenPos; nq_onArrayAccessStart(core->this, l); }
+                             index:Expr - { nq_onStatement(core->this, index); }
+                   (',' WS index:Expr - { nq_onStatement(core->this, index); })*
+                    - CLOS_SQUAR ~{ throwError(NQE_EXP_CLOSING_SQUAR, "Malformed array access! Expected ']' to end array access.\n"); }
+                    - { $$=l=nq_onArrayAccessEnd(core->this); }
+
+                 )
+                | - call:FunctionCall                   { nq_onFunctionCallExpr(core->this, call, l); $$=l=call; }
+                | - r:IDENT_CORE { tokenPos; $$=l=nq_onVarAccess(core->this, l, r); }
+                | - AS_KW { tokenPos; } -  r:Type       { $$=l=nq_onCast(core->this, l, r); }
+                | '&' ![&=] - &([ \t\r\n;,)}] | ']')    { core->token[1] += 1; $$=l=nq_onAddressOf(core->this, l); }
+                | '@'                                    { $$=l=nq_onDereference(core->this, l); }
+                | - call:FunctionCallNoname             { $$=l=nq_onFunctionCallCombo(core->this, call, l); }
+                )* -
+
+FunctionCall = callName:IDENT { tokenPos; nq_onFunctionCallStart(core->this, callName); }
+               FunctionCallCore { $$=nq_onFunctionCallEnd(core->this); }
+
+FunctionCallCore = (B_NOT - callSuffix:IDENT { nq_onFunctionCallSuffix(core->this, callSuffix); })?
+               '(' WS
+	       (
+                ( e:Expr { tokenPos; nq_onFunctionCallArg(core->this, e); }
+                | a:ACS  { tokenPos; nq_onFunctionCallArg(core->this, a); })
+               (WS
+               ','
+               WS
+                ( e:Expr { tokenPos; nq_onFunctionCallArg(core->this, e); }
+                | a:ACS  { tokenPos; nq_onFunctionCallArg(core->this, a); })
+               )*
+               )?
+               WS CLOS_PAREN ~{ rewindWhiteSpace; throwError(NQE_EXP_CLOSING_PAREN, "Expected ')' to close function call!\n") }
+
+FunctionCallNoname = { tokenPos; nq_onFunctionCallStart(core->this, ""); }
+               FunctionCallCore { $$=nq_onFunctionCallEnd(core->this); }
+
+ACS = (
+        { tokenPos; nq_onFunctionStart(core->this, "", ""); nq_onFunctionArgsStart(core->this); }
+        '|' WS?
+        ( i:IDENT { tokenPos; nq_onVarDeclStart(core->this); nq_onVarDeclName(core->this, i, ""); nq_onStatement(core->this, nq_onVarDeclEnd(core->this));  }
+          (WS ',' WS)?
+        )*
+        '|' WS { nq_onFunctionArgsEnd(core->this); }
+        (s:Stmt { nq_onStatement(core->this, s); })*
+        { tokenPos; $$=nq_onFunctionEnd(core->this); }
+)
+
+
+VariableAccess = i:IDENT_CORE
+
+Value   = ('-' - '(' { tokenPos; } WS inner:Expr WS ')' { $$=nq_onUnaryMinus(core->this, nq_onParenthesis(core->this, inner)); } -)
+        | ('+' - '(' { tokenPos; } WS inner:Expr WS ')' { $$=nq_onUnaryPlus(core->this, nq_onParenthesis(core->this, inner)); } -)
+        | ('-' - { tokenPos; } access:Access { $$=nq_onUnaryMinus(core->this, access); })
+        | ('+' - { tokenPos; } access:Access { $$=nq_onUnaryPlus(core->this, access); })
+        | ('(' { tokenPos; } WS inner:Expr WS ')' { $$=nq_onParenthesis(core->this, inner); } ('&' ![&=] { $$=nq_onAddressOf(core->this, $$); })? -)
+        | ValueCore
+
+ArrayLiteral = '[' { tokenPos; } WS { nq_onArrayLiteralStart(core->this); } (
+                            e:Expr { nq_onStatement(core->this, e); }
+               ((WS ',' | EOL) WS e:Expr { nq_onStatement(core->this, e); })*
+               (WS ',' WS)?
+               )? WS CLOS_SQUAR ~{ throwError(NQE_EXP_CLOSING_SQUAR, "Malformed array literal! Expected ']' to close.\n"); }
+                              { $$=nq_onArrayLiteralEnd(core->this); }
+
+Tuple        = '(' { tokenPos; } WS { nq_onTupleStart(core->this); } (
+                            e:Expr { nq_onStatement(core->this, e); }
+               ((WS ',' | EOL) WS e:Expr { nq_onStatement(core->this, e); })*
+               )? WS CLOS_PAREN ~{ throwError(NQE_EXP_CLOSING_SQUAR, "Malformed tuple! Expected ')' to close.\n"); }
+                              { $$=nq_onTupleEnd(core->this); }
+
+IntLiteral =
+        ( o:OCT_LIT -                                      { tokenPos; $$=nq_onOctLiteral(core->this, yytext); }
+        | h:HEX_LIT -                                      { tokenPos; $$=nq_onHexLiteral(core->this, yytext); }
+        | d:DEC_LIT -                                      { tokenPos; $$=nq_onDecLiteral(core->this, yytext); }
+        )
+
+ValueCore =
+        ( o:OCT_LIT -                                      { tokenPos; $$=nq_onOctLiteral(core->this, yytext); }
+        | h:HEX_LIT -                                      { tokenPos; $$=nq_onHexLiteral(core->this, yytext); }
+        | b:BIN_LIT -                                      { tokenPos; $$=nq_onBinLiteral(core->this, yytext); }
+        | f:FLOAT_LIT -                                    { tokenPos; $$=nq_onFloatLiteral(core->this, yytext); }
+        | d:DEC_LIT -                                      { tokenPos; $$=nq_onDecLiteral(core->this, yytext); }
+        | r: RAW_STRING_LIT -
+        | s:STRING_LIT -
+        | c:CHAR_LIT -
+        | b:BOOL_LIT  -                                    { tokenPos; $$=nq_onBoolLiteral(core->this, $$); }
+        | m:Match                                          { $$=m; }
+        | NULL_KW &[^A-Za-z_] -                            { tokenPos; $$=nq_onNull(core->this); }
+        | ArrayLiteral
+        | Tuple
+        | FunctionCall
+        | t:GenericType                                    { $$=nq_onTypeAccess(core->this, t); }
+        | v:VariableAccess                                 { tokenPos; $$=nq_onVarAccess(core->this, NULL, v); }
+        )
+
+FORCEDMALLOC_KW = "__onheap__"
+VIRTUAL_KW = "virtual"
+OVERRIDE_KW = "override"
+
+BREAK_KW     = "break"
+CONTINUE_KW  = "continue"
+RETURN_KW    = "return"
+
+FUNC_KW      = "func"
+CLASS_KW     = "class"
+COVER_KW     = "cover"
+ENUM_KW      = "enum"
+INTERFACE_KW = "interface"
+FROM_KW      = "from"
+ABSTRACT_KW  = "abstract"
+FINAL_KW     = "final"
+
+
+STATIC_KW    = "static"
+INLINE_KW    = "inline"
+EXTENDS_KW   = "extends"
+EXTERN_KW    = "extern"
+UNMANGLED_KW = "unmangled"
+IMPLEMENTS_KW= "implements"
+
+IMPORT_KW    = "import"
+INCLUDE_KW   = "include"
+USE_KW       = "use"
+IF_KW        = "if"
+ELSE_KW      = "else"
+FOR_KW       = "for"
+WHILE_KW     = "while"
+MATCH_KW     = "match"
+CASE_KW      = "case"
+AS_KW        = "as"
+IN_KW        = "in"
+INTO_KW      = "into"
+PROTO_KW     = "proto"
+TRY_KW       = "try"
+CATCH_KW     = "catch"
+
+SET_KW       = "set"
+GET_KW       = "get"
+
+OPERATOR_KW  = "operator"
+CONST_KW     = "const"
+
+TRUE_KW      = "true"
+FALSE_KW     = "false"
+
+NULL_KW      = "null"
+
+             # a few keywords voluntarily left out
+KW           = BREAK_KW | CONTINUE_KW | RETURN_KW | FUNC_KW
+             | COVER_KW | ENUM_KW | FROM_KW | ABSTRACT_KW | FINAL_KW
+             | STATIC_KW | INLINE_KW | EXTENDS_KW | EXTERN_KW | UNMANGLED_KW
+             | IMPORT_KW | INCLUDE_KW | IF_KW | ELSE_KW | FOR_KW
+             | WHILE_KW | AS_KW | OPERATOR_KW | CONST_KW | NULL_KW | MATCH_KW | CASE_KW
+             | TRY_KW | CATCH_KW
+
+DOT          = !DOUBLE_DOT '.'
+COLON        = !ASS_DECL !PROPASS_DECL ':'
+
+R_ARROW      = '->'
+DOUBLE_ARROW = '=>'
+
+# Operators
+
+ASS_DECL     = ':='  -
+PROPASS_DECL = '::='  -
+ASS          = !DOUBLE_ARROW '=' -
+ASS_ADD      = '+='  -
+ASS_SUB      = '-='  -
+ASS_EXP      = '**='  -
+ASS_MUL      = '*='  -
+ASS_DIV      = '/='  -
+ASS_B_RSHIFT = '>>='  -
+ASS_B_LSHIFT = '<<='  -
+ASS_B_XOR    = '^='  -
+ASS_B_OR     = '|='  -
+ASS_B_AND    = '&='  -
+
+QUEST        = '?'   -
+DOUBLE_QUEST = '??'  -
+
+L_OR         = '||'  -
+
+L_AND        = '&&'  -
+
+B_OR         = !L_OR '|' !'='   -
+
+B_XOR        = '^' !'='   -
+
+B_AND        = !L_AND '&' !'='  -
+
+EQUALS       = '=='  -
+NOT_EQUALS   = '!='  -
+
+LESSTHAN     = '<'  !'=' -
+MORETHAN     = '>'  !'=' -
+CMP          = '<=>' -
+LESSTHAN_EQ  = '<='  -
+MORETHAN_EQ  = '>='  -
+
+B_LSHIFT     = '<<' !'=' -
+B_RSHIFT     = '>>' !'=' -
+
+DOUBLE_DOT   = '..'  -
+
+L_NOT        = '!' !'='  -
+B_NOT        = '~' !'='  -
+PLUS         = '+' !'='   -
+MINUS        = '-' !'='  -
+
+PERCENT      = '%' !'='  -
+EXP          = '**' ! '='  -
+STAR         = '*' !'='  -
+SLASH        = '/' !'=' ![/*]   -
+
+CLOS_BRACK    = '}'
+CLOS_SQUAR    = ']'
+CLOS_PAREN    = ')'
+CLOS_COMMENT  = '*/'
+
+-          = ([ \t] | CommentMultiLine)*
+EOL        = ('\n' | '\r\n' | '\r')  { core->yylineno++; }
+Terminator = (CommentLine
+           | CommentMultiLine? (EOL | ';')
+             )
+WS         = ([ \t] | Comment | EOL)*
+
+OocDoc = "/**" < (!"*/" (EOL | .))* > "*/" { $$=nq_StringClone(yytext) } WS
+       | "///" < (!EOL .)*          > EOL  { $$=nq_StringClone(yytext) } WS
+       | { $$="" }
+Comment = (CommentLine | CommentMultiLine)
+CommentLine = "//" !'/' (!EOL .)* EOL | "////" ("/")* (!EOL .)* EOL
+CommentMultiLine =    "/*" !'*' (!"*/" (EOL | CommentMultiLineWithDocs | .))* CLOS_COMMENT ~{ throwError(NQE_UNCLOSED_COMMENT, "Unclosed multi-line comment!\n"); }
+CommentMultiLineWithDocs = "/*" (!"*/" (EOL | CommentMultiLineWithDocs | .))* CLOS_COMMENT ~{ throwError(NQE_UNCLOSED_COMMENT, "Unclosed multi-line comment!\n"); }
+
+INT_LIT_SUFFIX = [uUlL]*
+FP_LIT_SUFFIX = ([fF] | [lL])?
+OCT_LIT      = < "0c" [0-8] [0-8_]* INT_LIT_SUFFIX >
+BIN_LIT      = < "0b" [01] [01_]* INT_LIT_SUFFIX >
+HEX_LIT      = < "0x" [0-9a-fA-F] [0-9a-fA-F_]* INT_LIT_SUFFIX >
+DEC_LIT      = < "-"? [0-9] [0-9_]* INT_LIT_SUFFIX >
+FLOAT_LIT    = < "-"? [0-9] [0-9_]* DOT [0-9]? [0-9_]* ([Ee] [-+])? [0-9_]* FP_LIT_SUFFIX >
+
+IDENT        = i:IDENT_CORE -
+IDENT_CORE   = !(KW ![A-Za-z0-9_])  # a keyword is not an ident
+               < [a-zA-Z_][0-9a-zA-Z_]* > { $$=yytext; }
+               ( '?' { $$=nq_trailingQuest($$); }
+               | '!' { $$=nq_trailingBang($$); })?
+
+SINGLE_QUOTE = '\''
+DOUBLE_QUOTE = '"'
+
+RAW_STRING_LIT = 'c' s:STRING_LIT { nq_onRawStringLiteral(core->this, s); }
+
+# Strings are split into text chuncks and interpolated expressions
+StringChunk  = Interpolation | TextChunk
+
+Interpolation= !'"' !"\\" "#{" - e: Expr - "}"
+                { nq_onStringInterpolation(core->this, e); }
+
+TextInside   = ("\\" ("#{" | ('x'[0-9A-Za-z][0-9A-Za-z]([0-9A-Za-z][0-9A-Za-z])?) | [0-9][0-9]?[0-9]? | ["'abtnvfr0\\]) | EOL | .)
+
+# This is currently really bad, as it captures a few characters at a time (mostly a character at a time though)
+# I haven't found any way to do things differently, though :-/
+TextChunk    = < (!'"' TextInside ) >
+               { nq_onStringTextChunk(core->this, yytext); }
+
+STRING_LIT   = '"' { tokenPos; nq_onStringLiteralStart(core->this); }
+               (StringChunk)*
+               DOUBLE_QUOTE ~{ throwError(NQE_MALFORMED_STRINGLIT, "Malformed string literal!\n"); }
+               -  { $$=nq_onStringLiteralEnd(core->this); }
+
+CHAR_LIT     = '\'' < (!'\'' ("\\" ('x'[0-9A-Za-z][0-9A-Za-z]([0-9A-Za-z][0-9A-Za-z])? | [0-9][0-9]?[0-9]? | ["'abtnvfr0\\]) | .)) >
+               SINGLE_QUOTE  ~{ throwError(NQE_MALFORMED_CHARLIT , "Malformed char literal!\n"); }
+               -  { tokenPos; $$=nq_onCharLiteral(core->this, yytext); }
+
+BOOL_LIT     = (TRUE_KW &[^A-Za-z_] { $$=(void*) true; } | FALSE_KW &[^A-Za-z_] { $$=(void*) false; }) -
+
+%%
+
+int nq_memparse(void *this, char *buffer, size_t len) {
+
+    GREG *G = YY_ALLOC(sizeof(GREG), 0);
+    G->buflen = 0;
+
+    NagaQueenCore *core = YY_ALLOC(sizeof(NagaQueenCore), 0);
+    core->yylineno = 0;
+    core->eof = 0;
+    core->this = this;
+    core->path = NULL;
+    core->stream = buffer;
+    core->streamoffset = 0;
+    core->streamlen = len;
+    if(!core->stream) {
+        printf("Null input buffer\n");
+        return -1;
+    }
+    if(len < 0) {
+        printf("Invalid input buffer length\n");
+        return -1;
+    }
+    nq_setTokenPositionPointer(this, core->token, &(core->yylineno));
+    core->io = (struct _NagaQueenIoInterface) {
+      (_NagaQueenIoInterface_read)_nq_memread
+    };
+
+    G->data = core;
+
+    while (yyparse(G)) {}
+
+    return 0;
+
+}
+
+int nq_parse(void *this, char *path) {
+
+    GREG *G = YY_ALLOC(sizeof(GREG), 0);
+    G->buflen = 0;
+
+    NagaQueenCore *core = YY_ALLOC(sizeof(NagaQueenCore), 0);
+    core->yylineno = 0;
+    core->eof = 0;
+    core->this = this;
+    core->path = path;
+
+#if defined(__WIN32__) || defined(__WIN64__)
+    // we need to use binary mode because text mode on MinGW
+    // does CR->LF conversion and we handle that ourselves.
+    core->stream = fopen(path, "rb");
+#else
+    core->stream = fopen(path, "r");
+#endif
+
+    core->streamoffset = -1;
+    core->streamlen = -1;
+    if(!core->stream) {
+        printf("Not found: %s\n", path);
+        return -1;
+    }
+    nq_setTokenPositionPointer(this, core->token, &(core->yylineno));
+    core->io = (struct _NagaQueenIoInterface) {
+      (_NagaQueenIoInterface_read)_nq_fread
+    };
+
+    G->data = core;
+
+    while (yyparse(G)) {}
+    fclose(core->stream);
+
+    return 0;
+
+}
