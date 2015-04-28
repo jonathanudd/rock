@@ -20,6 +20,13 @@ You need the following packages when building rock:
 * tar (for extracting the C sources)
 * bzip2 (used by tar)
 
+## Install rock ooc compiler from .deb package
+1. Download latest rock release from https://github.com/cogneco/rock/releases
+2. Run command `sudo dpkg --install <latest-rock-release.deb>`
+
+## Uninstall rock ooc compiler
+* Run command `sudo apt-get remove rock`
+
 ## Build Cogneco version of rock with fasterthanlime version
 
 * Build rock from https://github.com/fasterthanlime/rock by following the 'Get started' guide below.
