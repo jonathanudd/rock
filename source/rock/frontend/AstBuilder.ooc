@@ -329,7 +329,7 @@ AstBuilder: class {
      */
 
     onVersionName: unmangled(nq_onVersionName) func (name: CString) -> VersionSpec {
-        VersionName new(name toString(), token())
+        VersionName new(name toString(), params showVersionWarnings, token())
     }
 
     onVersionNegation: unmangled(nq_onVersionNegation) func (spec: VersionSpec) -> VersionSpec {

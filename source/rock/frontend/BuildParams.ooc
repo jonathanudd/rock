@@ -102,6 +102,7 @@ BuildParams: class {
         // add rock dist location as last element
         libsPaths add(distLocation)
     }
+    showVersionWarnings := false
 
     // Module name
     moduleName := "ooc-default"

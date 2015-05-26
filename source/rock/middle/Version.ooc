@@ -52,7 +52,7 @@ VersionSpec: abstract class {
     isSatisfied: abstract func (params: BuildParams) -> Bool
 
     resolve: abstract func (trail: Trail, res: Resolver) -> Response
-    
+
     isResolved: func -> Bool { resolved }
 
 }
@@ -153,13 +153,14 @@ MixedComplexVersion: class extends Error {
 VersionName: class extends VersionSpec {
 
     name: String
+    showVersionWarnings: Bool
 
-    init: func ~name (=name, .token) {
+    init: func ~name (=name,=showVersionWarnings, .token) {
         super(token)
     }
 
     clone: func -> This {
-        c := new(name, token)
+        c := new(name, showVersionWarnings, token)
         c spec = spec
         c
     }
@@ -183,7 +184,9 @@ VersionName: class extends VersionSpec {
         } else {
             if (!_unknownVersionSpecs contains?(name)) {
                 _unknownVersionSpecs put(name, name)
-                res throwError(Warning new(token, "Unrecognized version: %s" format(name)))
+                if(showVersionWarnings)
+                  res throwError(Warning new(token, "Unrecognized version: %s" format(name)))
+
             }
         }
         resolved = true
@@ -266,7 +269,7 @@ VersionAnd: class extends VersionSpec {
     equals?: func (other: VersionSpec) -> Bool {
         match other {
             case a: This =>
-                specLeft equals?(a specLeft) && 
+                specLeft equals?(a specLeft) &&
                 specRight equals?(a specRight)
             case => false
         }
@@ -330,4 +333,3 @@ VersionOr: class extends VersionSpec {
     }
 
 }
-
