@@ -659,8 +659,9 @@ TypeDecl: abstract class extends Declaration {
                               if(foundVirtual) {break}
                               for (other in list[j] functions) {
                                   if ((fdecl getName() == other getName()) && (fdecl getSuffixOrEmpty() == other getSuffixOrEmpty())) {
-                                    if(other isVirtual) {
-                                      notEqualNameAndSuffix = true
+                                    notEqualNameAndSuffix = true
+                                    if(other isVirtual || other isAbstract) {
+                                      //notEqualNameAndSuffix = true
                                       foundVirtual = true
                                       break
                                     }
@@ -668,9 +669,9 @@ TypeDecl: abstract class extends Declaration {
                                       foundVirtual = false
                                     }
                                   }
-                                  else {
+                                  /*else {
                                     notEqualNameAndSuffix = false
-                                  }
+                                  }*/
                               }
                             }
                             if (!notEqualNameAndSuffix) {
